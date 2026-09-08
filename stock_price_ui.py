@@ -290,20 +290,15 @@ class TradeEntryDialog(tk.Toplevel):
                 else date.today().isoformat()
             )
         )
-        date_controls = ttk.Frame(content)
-        date_controls.grid(row=0, column=1, sticky=tk.EW, pady=(0, 12))
         self.date_entry = ttk.Entry(
-            date_controls,
+            content,
             textvariable=self.date_var,
-            width=18,
+            width=28,
             state="readonly",
+            cursor="hand2",
         )
-        self.date_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(
-            date_controls,
-            text="选择日期",
-            command=self._open_calendar,
-        ).pack(side=tk.LEFT, padx=(8, 0))
+        self.date_entry.grid(row=0, column=1, sticky=tk.EW, pady=(0, 12))
+        self.date_entry.bind("<Button-1>", self._open_calendar)
 
         ttk.Label(content, text="交易类型").grid(
             row=1,
@@ -392,8 +387,9 @@ class TradeEntryDialog(tk.Toplevel):
         self.grab_set()
         self.after_idle(self._place_and_focus)
 
-    def _open_calendar(self) -> None:
+    def _open_calendar(self, _event: tk.Event | None = None) -> str:
         CalendarPopup(self, self.date_var.get(), self.date_var.set)
+        return "break"
 
     def _validate_quantity_input(self, proposed_value: str) -> bool:
         return proposed_value == "" or (
