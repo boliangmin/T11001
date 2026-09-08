@@ -515,14 +515,14 @@ class StockTradeWindow(tk.Toplevel):
         metrics.pack(anchor=tk.W, pady=(7, 0))
         self.profit_summary_var = tk.StringVar(value="--")
         self.return_summary_var = tk.StringVar(value="--")
-        ttk.Label(metrics, text="盈亏", style="Hint.TLabel").pack(side=tk.LEFT)
+        ttk.Label(metrics, text="总盈亏", style="Hint.TLabel").pack(side=tk.LEFT)
         self.profit_summary_label = ttk.Label(
             metrics,
             textvariable=self.profit_summary_var,
             font=("Microsoft YaHei UI", 11, "bold"),
         )
         self.profit_summary_label.pack(side=tk.LEFT, padx=(8, 28))
-        ttk.Label(metrics, text="收益率", style="Hint.TLabel").pack(side=tk.LEFT)
+        ttk.Label(metrics, text="总收益率", style="Hint.TLabel").pack(side=tk.LEFT)
         self.return_summary_label = ttk.Label(
             metrics,
             textvariable=self.return_summary_var,
@@ -541,7 +541,14 @@ class StockTradeWindow(tk.Toplevel):
         table_frame.pack(fill=tk.BOTH, expand=True)
         self.trade_tree = ttk.Treeview(
             table_frame,
-            columns=("trade_date", "trade_type", "price", "quantity"),
+            columns=(
+                "trade_date",
+                "trade_type",
+                "price",
+                "quantity",
+                "profit",
+                "return",
+            ),
             show="headings",
             selectmode="browse",
         )
@@ -549,10 +556,14 @@ class StockTradeWindow(tk.Toplevel):
         self.trade_tree.heading("trade_type", text="交易类型", anchor=tk.CENTER)
         self.trade_tree.heading("price", text="交易价格", anchor=tk.CENTER)
         self.trade_tree.heading("quantity", text="交易份额", anchor=tk.CENTER)
-        self.trade_tree.column("trade_date", width=150, anchor=tk.CENTER)
-        self.trade_tree.column("trade_type", width=100, anchor=tk.CENTER)
-        self.trade_tree.column("price", width=160, anchor=tk.CENTER)
-        self.trade_tree.column("quantity", width=140, anchor=tk.CENTER)
+        self.trade_tree.heading("profit", text="盈亏", anchor=tk.CENTER)
+        self.trade_tree.heading("return", text="收益率", anchor=tk.CENTER)
+        self.trade_tree.column("trade_date", width=100, anchor=tk.CENTER)
+        self.trade_tree.column("trade_type", width=70, anchor=tk.CENTER)
+        self.trade_tree.column("price", width=105, anchor=tk.CENTER)
+        self.trade_tree.column("quantity", width=80, anchor=tk.CENTER)
+        self.trade_tree.column("profit", width=125, anchor=tk.CENTER)
+        self.trade_tree.column("return", width=85, anchor=tk.CENTER)
         self.trade_tree.tag_configure("buy", foreground=BUY_COLOR)
         self.trade_tree.tag_configure("sell", foreground=SELL_COLOR)
         scrollbar = ttk.Scrollbar(
@@ -594,6 +605,10 @@ class StockTradeWindow(tk.Toplevel):
         for index, record in enumerate(
             self.owner.trades.get(self.symbol.canonical, [])
         ):
+            profit, return_rate = self.owner._calculate_trade_performance(
+                self.symbol,
+                record,
+            )
             self.trade_tree.insert(
                 "",
                 tk.END,
@@ -603,6 +618,8 @@ class StockTradeWindow(tk.Toplevel):
                     record.trade_type,
                     f"{record.price} {self.currency}",
                     record.quantity,
+                    profit,
+                    return_rate,
                 ),
                 tags=("buy",) if record.trade_type == "买入" else ("sell",),
             )
@@ -618,6 +635,19 @@ class StockTradeWindow(tk.Toplevel):
         self.return_summary_label.configure(
             foreground=self._metric_color(return_rate)
         )
+        records = self.owner.trades.get(self.symbol.canonical, [])
+        for index, record in enumerate(records):
+            item_id = f"trade-{index}"
+            if not self.trade_tree.exists(item_id):
+                continue
+            values = list(self.trade_tree.item(item_id, "values"))
+            if len(values) != 6:
+                continue
+            values[4], values[5] = self.owner._calculate_trade_performance(
+                self.symbol,
+                record,
+            )
+            self.trade_tree.item(item_id, values=values)
 
     @staticmethod
     def _metric_color(value: str) -> str:
@@ -1846,6 +1876,36 @@ class StockPriceApp(tk.Tk):
     def _calculate_performance(self, symbol: StockSymbol) -> tuple[str, str]:
         _, profit, return_rate = self._calculate_position_metrics(symbol)
         return profit, return_rate
+
+    def _calculate_trade_performance(
+        self,
+        symbol: StockSymbol,
+        record: TradeRecord,
+    ) -> tuple[str, str]:
+        current_quote = self.current_prices.get(symbol.canonical)
+        if current_quote is None:
+            return "--", "--"
+
+        try:
+            trade_price = Decimal(record.price)
+            quantity = Decimal(record.quantity)
+        except InvalidOperation:
+            return "--", "--"
+        if (
+            trade_price <= 0
+            or quantity <= 0
+            or record.trade_type not in {"买入", "卖出"}
+        ):
+            return "--", "--"
+
+        current_price, currency = current_quote
+        direction = Decimal("1") if record.trade_type == "买入" else Decimal("-1")
+        profit = (current_price - trade_price) * quantity * direction
+        return_rate = (current_price - trade_price) / trade_price * direction
+        return (
+            f"{profit:+,.2f} {currency}",
+            f"{return_rate * Decimal('100'):+.2f}%",
+        )
 
     def _refresh_performance_cells(self, symbol: StockSymbol) -> None:
         tree = self._tree_for_symbol(symbol)
