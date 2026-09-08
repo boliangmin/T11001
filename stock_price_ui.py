@@ -531,14 +531,9 @@ class StockTradeWindow(tk.Toplevel):
         header.pack(fill=tk.X, pady=(0, 14))
         title_area = ttk.Frame(header)
         title_area.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Label(
-            title_area,
-            text=f"{display_name or '--'}  ·  {symbol.canonical}",
-            style="Title.TLabel",
-        ).pack(anchor=tk.W)
 
         metrics = ttk.Frame(title_area)
-        metrics.pack(anchor=tk.W, pady=(7, 0))
+        metrics.pack(anchor=tk.W, pady=(8, 0))
         self.profit_summary_var = tk.StringVar(value="--")
         self.return_summary_var = tk.StringVar(value="--")
         ttk.Label(metrics, text="总盈亏", style="Hint.TLabel").pack(side=tk.LEFT)
@@ -855,7 +850,7 @@ class StockPriceApp(tk.Tk):
         super().__init__()
         self.withdraw()
         self.configure(background=APP_BACKGROUND)
-        self.title("美股 / 港股行情")
+        self.title("我钱呢")
         self.geometry("1050x600")
         self.minsize(820, 430)
 
@@ -1104,11 +1099,6 @@ class StockPriceApp(tk.Tk):
     def _build_ui(self) -> None:
         outer = ttk.Frame(self, padding=(22, 18, 22, 14))
         outer.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Label(outer, text="股票行情", style="Title.TLabel").pack(
-            anchor=tk.W,
-            pady=(0, 16),
-        )
 
         input_frame = ttk.Frame(outer)
         input_frame.pack(fill=tk.X, pady=(0, 8))
