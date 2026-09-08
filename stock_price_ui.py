@@ -26,7 +26,24 @@ from stock_price import (
 
 
 PROVIDER_NAMES = ["yahoo", "tencent", "sina"]
-STATE_VERSION = 1
+MARKET_ORDER = ("US", "HK")
+MARKET_TITLES = {"US": "美股", "HK": "港股"}
+TABLE_COLUMNS = ("code", "name", "price", "change", "time")
+TABLE_HEADINGS = {
+    "code": "股票代码",
+    "name": "中文名称",
+    "price": "最新价格",
+    "change": "涨跌幅",
+    "time": "行情时间",
+}
+DEFAULT_COLUMN_WIDTHS = {
+    "code": 105,
+    "name": 155,
+    "price": 120,
+    "change": 90,
+    "time": 220,
+}
+STATE_VERSION = 2
 WINDOW_GEOMETRY_PATTERN = re.compile(
     r"^(?P<width>\d+)x(?P<height>\d+)(?P<x>[+-]\d+)(?P<y>[+-]\d+)$"
 )
@@ -53,6 +70,9 @@ class StockPriceApp(tk.Tk):
         self._state_path = state_path or _default_state_path()
         self.symbols: dict[str, StockSymbol] = {}
         self.display_names: dict[str, str] = {}
+        self.trees: dict[str, ttk.Treeview] = {}
+        self.market_pages: dict[str, ttk.Frame] = {}
+        self._swipe_start: tuple[ttk.Treeview, int, int] | None = None
         self._result_queue: queue.Queue[tuple] = queue.Queue()
         self._refreshing = False
         self._queue_after_id: str | None = None
@@ -165,68 +185,60 @@ class StockPriceApp(tk.Tk):
         self.suggestion_list.bind("<Return>", self._choose_suggestion)
         self.suggestion_list.bind("<Escape>", lambda _event: self._hide_suggestions())
 
-        self.table_frame = ttk.Frame(outer)
+        self.table_frame = ttk.Notebook(outer)
         self.table_frame.pack(fill=tk.BOTH, expand=True)
 
-        columns = (
-            "code",
-            "name",
-            "price",
-            "change",
-            "time",
-        )
-        self.tree = ttk.Treeview(
-            self.table_frame,
-            columns=columns,
-            show="headings",
-            selectmode="extended",
-        )
-        headings = {
-            "code": "股票代码",
-            "name": "中文名称",
-            "price": "最新价格",
-            "change": "涨跌幅",
-            "time": "行情时间",
-        }
-        widths = {
-            "code": 105,
-            "name": 155,
-            "price": 120,
-            "change": 90,
-            "time": 220,
-        }
-        for column in columns:
-            self.tree.heading(column, text=headings[column], anchor=tk.CENTER)
-            self.tree.column(
-                column,
-                width=widths[column],
-                minwidth=70,
-                anchor=tk.CENTER,
-                stretch=column in {"name", "time"},
+        for market in MARKET_ORDER:
+            page = ttk.Frame(self.table_frame)
+            self.market_pages[market] = page
+            self.table_frame.add(page, text=MARKET_TITLES[market])
+
+            tree = ttk.Treeview(
+                page,
+                columns=TABLE_COLUMNS,
+                show="headings",
+                selectmode="extended",
+            )
+            self.trees[market] = tree
+            for column in TABLE_COLUMNS:
+                tree.heading(
+                    column,
+                    text=TABLE_HEADINGS[column],
+                    anchor=tk.CENTER,
+                )
+                tree.column(
+                    column,
+                    width=DEFAULT_COLUMN_WIDTHS[column],
+                    minwidth=70,
+                    anchor=tk.CENTER,
+                    stretch=column in {"name", "time"},
+                )
+
+            tree.tag_configure("up", foreground="#d93025")
+            tree.tag_configure("down", foreground="#188038")
+            tree.tag_configure("waiting", foreground="#6b7280")
+            tree.bind("<Button-1>", self._clear_selection_on_blank)
+            tree.bind("<ButtonPress-1>", self._begin_market_swipe, add="+")
+            tree.bind("<ButtonRelease-1>", self._finish_market_swipe, add="+")
+            tree.bind("<Shift-MouseWheel>", self._switch_market_with_wheel)
+            tree.bind("<Delete>", self.remove_selected)
+
+            vertical = ttk.Scrollbar(page, orient=tk.VERTICAL, command=tree.yview)
+            horizontal = ttk.Scrollbar(
+                page,
+                orient=tk.HORIZONTAL,
+                command=tree.xview,
+            )
+            tree.configure(
+                yscrollcommand=vertical.set,
+                xscrollcommand=horizontal.set,
             )
 
-        self.tree.tag_configure("up", foreground="#d93025")
-        self.tree.tag_configure("down", foreground="#188038")
-        self.tree.tag_configure("waiting", foreground="#6b7280")
-        self.tree.bind("<Button-1>", self._clear_selection_on_blank)
-        self.tree.bind("<Delete>", self.remove_selected)
-
-        vertical = ttk.Scrollbar(
-            self.table_frame, orient=tk.VERTICAL, command=self.tree.yview
-        )
-        horizontal = ttk.Scrollbar(
-            self.table_frame, orient=tk.HORIZONTAL, command=self.tree.xview
-        )
-        self.tree.configure(
-            yscrollcommand=vertical.set,
-            xscrollcommand=horizontal.set,
-        )
-
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vertical.grid(row=0, column=1, sticky="ns")
-        horizontal.grid(row=1, column=0, sticky="ew")
-        self.table_frame.rowconfigure(0, weight=1)
-        self.table_frame.columnconfigure(0, weight=1)
+            tree.grid(row=0, column=0, sticky="nsew")
+            vertical.grid(row=0, column=1, sticky="ns")
+            horizontal.grid(row=1, column=0, sticky="ew")
+            page.rowconfigure(0, weight=1)
+            page.columnconfigure(0, weight=1)
 
         footer = ttk.Frame(outer)
         footer.pack(fill=tk.X, pady=(10, 0))
@@ -236,7 +248,7 @@ class StockPriceApp(tk.Tk):
         )
         ttk.Label(
             footer,
-            text="公开行情可能延迟｜选中行后按 Delete 可移除",
+            text="公开行情可能延迟｜左右滑动切换市场｜Delete 可移除",
             style="Hint.TLabel",
         ).pack(side=tk.RIGHT)
 
@@ -257,11 +269,36 @@ class StockPriceApp(tk.Tk):
         self.geometry(f"{width}x{height}+{x}+{y}")
         return True
 
-    def _apply_column_widths(self, widths: dict[str, int]) -> None:
+    def _active_market(self) -> str:
+        selected_page = self.table_frame.select()
+        for market, page in self.market_pages.items():
+            if str(page) == selected_page:
+                return market
+        return MARKET_ORDER[0]
+
+    def _active_tree(self) -> ttk.Treeview:
+        return self.trees[self._active_market()]
+
+    def _select_market(self, market: str) -> None:
+        page = self.market_pages.get(market)
+        if page is not None:
+            self.table_frame.select(page)
+
+    def _tree_for_symbol(self, symbol: StockSymbol) -> ttk.Treeview:
+        return self.trees[symbol.market]
+
+    def _apply_column_widths(
+        self,
+        widths_by_market: dict[str, dict[str, int]],
+    ) -> None:
         self._layout_after_id = None
-        for column, width in widths.items():
-            if column in self.tree["columns"]:
-                self.tree.column(column, width=width)
+        for market, widths in widths_by_market.items():
+            tree = self.trees.get(market)
+            if tree is None:
+                continue
+            for column, width in widths.items():
+                if column in tree["columns"]:
+                    tree.column(column, width=width)
 
     def _refresh_restored_stocks(self, symbols: list[StockSymbol]) -> None:
         self._startup_refresh_after_id = None
@@ -273,24 +310,33 @@ class StockPriceApp(tk.Tk):
 
         try:
             payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict) or payload.get("version") != STATE_VERSION:
+            if not isinstance(payload, dict) or payload.get("version") not in {1, 2}:
                 raise ValueError("保存文件版本不受支持")
 
             layout_restored = self._restore_geometry(payload.get("window_geometry"))
             saved_columns = payload.get("column_widths")
             if isinstance(saved_columns, dict):
-                valid_widths: dict[str, int] = {}
-                for column in self.tree["columns"]:
-                    width = saved_columns.get(column)
-                    if isinstance(width, int) and 70 <= width <= 2000:
-                        valid_widths[column] = width
+                widths_by_market: dict[str, dict[str, int]] = {}
+                for market in MARKET_ORDER:
+                    market_widths = saved_columns.get(market)
+                    if not isinstance(market_widths, dict):
+                        market_widths = saved_columns
+                    valid_widths = {
+                        column: width
+                        for column in TABLE_COLUMNS
+                        if isinstance((width := market_widths.get(column)), int)
+                        and 70 <= width <= 2000
+                    }
+                    if valid_widths:
+                        widths_by_market[market] = valid_widths
                         layout_restored = True
-                if valid_widths:
+                if widths_by_market:
                     self._layout_after_id = self.after_idle(
-                        lambda widths=valid_widths: self._apply_column_widths(widths)
+                        lambda widths=widths_by_market: self._apply_column_widths(widths)
                     )
 
             restored_count = 0
+            first_restored_market = ""
             saved_stocks = payload.get("stocks")
             if isinstance(saved_stocks, list):
                 for item in saved_stocks:
@@ -307,7 +353,8 @@ class StockPriceApp(tk.Tk):
 
                     self.symbols[symbol.canonical] = symbol
                     self.display_names[symbol.canonical] = display_name
-                    self.tree.insert(
+                    tree = self._tree_for_symbol(symbol)
+                    tree.insert(
                         "",
                         tk.END,
                         iid=symbol.canonical,
@@ -321,6 +368,14 @@ class StockPriceApp(tk.Tk):
                         tags=("waiting",),
                     )
                     restored_count += 1
+                    if not first_restored_market:
+                        first_restored_market = symbol.market
+
+            active_market = str(payload.get("active_market") or "")
+            if active_market not in self.market_pages:
+                active_market = first_restored_market
+            if active_market:
+                self._select_market(active_market)
 
             if restored_count:
                 self.status_var.set(
@@ -342,20 +397,25 @@ class StockPriceApp(tk.Tk):
             "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "window_geometry": self.geometry(),
             "column_widths": {
-                column: int(self.tree.column(column, "width"))
-                for column in self.tree["columns"]
+                market: {
+                    column: int(tree.column(column, "width"))
+                    for column in tree["columns"]
+                }
+                for market, tree in self.trees.items()
             },
+            "active_market": self._active_market(),
             "stocks": [],
         }
-        for item_id in self.tree.get_children(""):
-            if item_id not in self.symbols:
-                continue
-            payload["stocks"].append(
-                {
-                    "symbol": item_id,
-                    "display_name": self.display_names.get(item_id, ""),
-                }
-            )
+        for market in MARKET_ORDER:
+            for item_id in self.trees[market].get_children(""):
+                if item_id not in self.symbols:
+                    continue
+                payload["stocks"].append(
+                    {
+                        "symbol": item_id,
+                        "display_name": self.display_names.get(item_id, ""),
+                    }
+                )
 
         temporary_path = self._state_path.with_name(
             f"{self._state_path.name}.{os.getpid()}.tmp"
@@ -556,6 +616,8 @@ class StockPriceApp(tk.Tk):
 
         symbol = selected.symbol
         selected_name = selected.name.strip()
+        tree = self._tree_for_symbol(symbol)
+        self._select_market(symbol.market)
 
         if symbol.canonical in self.symbols:
             if selected_name and (
@@ -564,8 +626,8 @@ class StockPriceApp(tk.Tk):
             ):
                 self.display_names[symbol.canonical] = selected_name
                 self._save_state()
-            self.tree.selection_set(symbol.canonical)
-            self.tree.see(symbol.canonical)
+            tree.selection_set(symbol.canonical)
+            tree.see(symbol.canonical)
             self.status_var.set(f"{symbol.canonical} 已在列表中，正在重新获取行情。")
             self._clear_search()
             self._start_refresh([symbol])
@@ -573,15 +635,15 @@ class StockPriceApp(tk.Tk):
 
         self.symbols[symbol.canonical] = symbol
         self.display_names[symbol.canonical] = selected_name
-        self.tree.insert(
+        tree.insert(
             "",
             tk.END,
             iid=symbol.canonical,
             values=(symbol.canonical, selected_name or "--", "--", "--", "等待刷新"),
             tags=("waiting",),
         )
-        self.tree.selection_set(symbol.canonical)
-        self.tree.see(symbol.canonical)
+        tree.selection_set(symbol.canonical)
+        tree.see(symbol.canonical)
         self._save_state()
         self._clear_search()
         self.code_entry.focus_set()
@@ -595,20 +657,61 @@ class StockPriceApp(tk.Tk):
         self._start_refresh(list(self.symbols.values()))
 
     def _clear_selection_on_blank(self, event: tk.Event) -> None:
-        row_id = self.tree.identify_row(event.y)
-        region = self.tree.identify_region(event.x, event.y)
+        tree = event.widget
+        if not isinstance(tree, ttk.Treeview):
+            return
+        row_id = tree.identify_row(event.y)
+        region = tree.identify_region(event.x, event.y)
         if not row_id and region not in {"heading", "separator"}:
-            selected_items = self.tree.selection()
+            selected_items = tree.selection()
             if selected_items:
-                self.tree.selection_remove(*selected_items)
-            self.tree.focus("")
+                tree.selection_remove(*selected_items)
+            tree.focus("")
 
-    def remove_selected(self, _event: tk.Event | None = None) -> None:
+    def _begin_market_swipe(self, event: tk.Event) -> None:
+        tree = event.widget
+        if isinstance(tree, ttk.Treeview):
+            self._swipe_start = (tree, event.x, event.y)
+
+    def _finish_market_swipe(self, event: tk.Event) -> None:
+        swipe_start = self._swipe_start
+        self._swipe_start = None
+        if swipe_start is None or event.widget is not swipe_start[0]:
+            return
+
+        horizontal_distance = event.x - swipe_start[1]
+        vertical_distance = event.y - swipe_start[2]
+        if (
+            abs(horizontal_distance) >= 80
+            and abs(horizontal_distance) > abs(vertical_distance) * 1.5
+        ):
+            self._switch_market_page(1 if horizontal_distance < 0 else -1)
+
+    def _switch_market_with_wheel(self, event: tk.Event) -> str:
+        if event.delta:
+            self._switch_market_page(1 if event.delta < 0 else -1)
+        return "break"
+
+    def _switch_market_page(self, direction: int) -> None:
+        current_market = self._active_market()
+        current_index = MARKET_ORDER.index(current_market)
+        target_index = max(0, min(current_index + direction, len(MARKET_ORDER) - 1))
+        if target_index == current_index:
+            return
+        target_market = MARKET_ORDER[target_index]
+        self._select_market(target_market)
+        if not self._refreshing:
+            self.status_var.set(f"已切换至{MARKET_TITLES[target_market]}列表。")
+
+    def remove_selected(self, event: tk.Event | None = None) -> None:
         if self._refreshing:
             self.status_var.set("行情刷新中，请稍后再移除股票。")
             return
-        for item_id in self.tree.selection():
-            self.tree.delete(item_id)
+        tree = event.widget if event is not None else self._active_tree()
+        if not isinstance(tree, ttk.Treeview):
+            tree = self._active_tree()
+        for item_id in tree.selection():
+            tree.delete(item_id)
             self.symbols.pop(item_id, None)
             self.display_names.pop(item_id, None)
         self._save_state()
@@ -684,7 +787,8 @@ class StockPriceApp(tk.Tk):
         quotes: list[PriceQuote],
         errors: dict[str, str],
     ) -> None:
-        if not self.tree.exists(symbol.canonical):
+        tree = self._tree_for_symbol(symbol)
+        if not tree.exists(symbol.canonical):
             return
         if not quotes:
             detail = "；".join(errors.values()) or "所有数据源均未返回价格"
@@ -717,7 +821,7 @@ class StockPriceApp(tk.Tk):
         if best.change_percent is not None:
             tag = "up" if best.change_percent > 0 else "down" if best.change_percent < 0 else ""
 
-        self.tree.item(
+        tree.item(
             symbol.canonical,
             values=(
                 symbol.canonical,
@@ -731,12 +835,13 @@ class StockPriceApp(tk.Tk):
         self._save_state()
 
     def _show_row_error(self, symbol: StockSymbol, error: str) -> None:
-        if not self.tree.exists(symbol.canonical):
+        tree = self._tree_for_symbol(symbol)
+        if not tree.exists(symbol.canonical):
             return
-        current = list(self.tree.item(symbol.canonical, "values"))
+        current = list(tree.item(symbol.canonical, "values"))
         if len(current) == 5 and current[2] == "--":
             current[-1] = "获取失败"
-            self.tree.item(symbol.canonical, values=current, tags=("waiting",))
+            tree.item(symbol.canonical, values=current, tags=("waiting",))
         self._save_state()
         self.status_var.set(f"{symbol.canonical} 行情获取失败：{error[:100]}")
 
