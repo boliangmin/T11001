@@ -32,20 +32,32 @@ from stock_price import (
 PROVIDER_NAMES = ["yahoo", "tencent", "sina"]
 MARKET_ORDER = ("US", "HK")
 MARKET_TITLES = {"US": "美股", "HK": "港股"}
-TABLE_COLUMNS = ("code", "name", "price", "change", "time")
+TABLE_COLUMNS = (
+    "code",
+    "name",
+    "price",
+    "change",
+    "profit",
+    "return",
+    "time",
+)
 TABLE_HEADINGS = {
     "code": "股票代码",
     "name": "中文名称",
     "price": "最新价格",
     "change": "涨跌幅",
+    "profit": "盈亏",
+    "return": "收益率",
     "time": "行情时间",
 }
 DEFAULT_COLUMN_WIDTHS = {
-    "code": 105,
-    "name": 155,
-    "price": 120,
-    "change": 90,
-    "time": 220,
+    "code": 90,
+    "name": 115,
+    "price": 100,
+    "change": 70,
+    "profit": 100,
+    "return": 75,
+    "time": 160,
 }
 APP_BACKGROUND = "#F4F7FB"
 SURFACE = "#FFFFFF"
@@ -664,6 +676,7 @@ class StockPriceApp(tk.Tk):
         self.symbols: dict[str, StockSymbol] = {}
         self.display_names: dict[str, str] = {}
         self.trades: dict[str, list[TradeRecord]] = {}
+        self.current_prices: dict[str, tuple[Decimal, str]] = {}
         self._trade_windows: dict[str, StockTradeWindow] = {}
         self.trees: dict[str, ttk.Treeview] = {}
         self.market_pages: dict[str, ttk.Frame] = {}
@@ -916,7 +929,7 @@ class StockPriceApp(tk.Tk):
             input_frame,
             text="添加",
             command=self.add_stock,
-            style="Primary.TButton",
+            style="Action.TButton",
             state=tk.DISABLED,
         )
         self.add_button.pack(side=tk.LEFT, padx=(10, 8))
@@ -985,7 +998,7 @@ class StockPriceApp(tk.Tk):
                 tree.column(
                     column,
                     width=DEFAULT_COLUMN_WIDTHS[column],
-                    minwidth=70,
+                    minwidth=60,
                     anchor=tk.CENTER,
                     stretch=column in {"name", "time"},
                 )
@@ -1001,19 +1014,10 @@ class StockPriceApp(tk.Tk):
             tree.bind("<Delete>", self.remove_selected)
 
             vertical = ttk.Scrollbar(page, orient=tk.VERTICAL, command=tree.yview)
-            horizontal = ttk.Scrollbar(
-                page,
-                orient=tk.HORIZONTAL,
-                command=tree.xview,
-            )
-            tree.configure(
-                yscrollcommand=vertical.set,
-                xscrollcommand=horizontal.set,
-            )
+            tree.configure(yscrollcommand=vertical.set)
 
             tree.grid(row=0, column=0, sticky="nsew")
             vertical.grid(row=0, column=1, sticky="ns")
-            horizontal.grid(row=1, column=0, sticky="ew")
             page.rowconfigure(0, weight=1)
             page.columnconfigure(0, weight=1)
 
@@ -1101,13 +1105,17 @@ class StockPriceApp(tk.Tk):
                     market_widths = saved_columns.get(market)
                     if not isinstance(market_widths, dict):
                         market_widths = saved_columns
+                    if not all(
+                        column in market_widths for column in TABLE_COLUMNS
+                    ):
+                        continue
                     valid_widths = {
                         column: width
                         for column in TABLE_COLUMNS
                         if isinstance((width := market_widths.get(column)), int)
-                        and 70 <= width <= 2000
+                        and 60 <= width <= 2000
                     }
-                    if valid_widths:
+                    if len(valid_widths) == len(TABLE_COLUMNS):
                         widths_by_market[market] = valid_widths
                         layout_restored = True
                 if widths_by_market:
@@ -1141,6 +1149,8 @@ class StockPriceApp(tk.Tk):
                         values=(
                             symbol.canonical,
                             display_name or "--",
+                            "--",
+                            "--",
                             "--",
                             "--",
                             "等待刷新",
@@ -1476,7 +1486,15 @@ class StockPriceApp(tk.Tk):
             "",
             tk.END,
             iid=symbol.canonical,
-            values=(symbol.canonical, selected_name or "--", "--", "--", "等待刷新"),
+            values=(
+                symbol.canonical,
+                selected_name or "--",
+                "--",
+                "--",
+                "--",
+                "--",
+                "等待刷新",
+            ),
             tags=("waiting",),
         )
         tree.selection_set(symbol.canonical)
@@ -1575,6 +1593,7 @@ class StockPriceApp(tk.Tk):
         records = self.trades.setdefault(symbol.canonical, [])
         records.append(record)
         if self._save_state():
+            self._refresh_performance_cells(symbol)
             self.status_var.set(
                 f"已保存 {symbol.canonical} 的{record.trade_type}记录：{record.trade_date}。"
             )
@@ -1596,6 +1615,7 @@ class StockPriceApp(tk.Tk):
         previous = records[index]
         records[index] = record
         if self._save_state():
+            self._refresh_performance_cells(symbol)
             self.status_var.set(
                 f"已修改 {symbol.canonical} 的交易记录：{record.trade_date}。"
             )
@@ -1611,6 +1631,7 @@ class StockPriceApp(tk.Tk):
         if self._save_state():
             if not records:
                 self.trades.pop(symbol.canonical, None)
+            self._refresh_performance_cells(symbol)
             self.status_var.set(
                 f"已删除 {symbol.canonical} 的交易记录：{deleted.trade_date}。"
             )
@@ -1629,8 +1650,51 @@ class StockPriceApp(tk.Tk):
             tree.delete(item_id)
             self.symbols.pop(item_id, None)
             self.display_names.pop(item_id, None)
+            self.current_prices.pop(item_id, None)
         self._save_state()
         self.status_var.set(f"列表中共有 {len(self.symbols)} 只股票。")
+
+    def _calculate_performance(self, symbol: StockSymbol) -> tuple[str, str]:
+        current_quote = self.current_prices.get(symbol.canonical)
+        records = self.trades.get(symbol.canonical, [])
+        if current_quote is None or not records:
+            return "--", "--"
+
+        current_price, currency = current_quote
+        buy_cost = Decimal("0")
+        sell_proceeds = Decimal("0")
+        net_quantity = Decimal("0")
+        try:
+            for record in records:
+                amount = Decimal(record.price) * Decimal(record.quantity)
+                quantity = Decimal(record.quantity)
+                if record.trade_type == "买入":
+                    buy_cost += amount
+                    net_quantity += quantity
+                elif record.trade_type == "卖出":
+                    sell_proceeds += amount
+                    net_quantity -= quantity
+        except InvalidOperation:
+            return "--", "--"
+
+        profit = current_price * net_quantity + sell_proceeds - buy_cost
+        profit_text = f"{profit:+,.2f} {currency}"
+        return_text = (
+            "--"
+            if buy_cost <= 0
+            else f"{profit / buy_cost * Decimal('100'):+.2f}%"
+        )
+        return profit_text, return_text
+
+    def _refresh_performance_cells(self, symbol: StockSymbol) -> None:
+        tree = self._tree_for_symbol(symbol)
+        if not tree.exists(symbol.canonical):
+            return
+        current = list(tree.item(symbol.canonical, "values"))
+        if len(current) != len(TABLE_COLUMNS):
+            return
+        current[4], current[5] = self._calculate_performance(symbol)
+        tree.item(symbol.canonical, values=current)
 
     def _start_refresh(self, symbols: list[StockSymbol]) -> None:
         if self._refreshing:
@@ -1731,6 +1795,11 @@ class StockPriceApp(tk.Tk):
         )
         price = f"{best.price:,.3f} {best.currency}"
         quote_time = best.quote_time or "未提供"
+        self.current_prices[symbol.canonical] = (
+            Decimal(str(best.price)),
+            best.currency,
+        )
+        profit, return_rate = self._calculate_performance(symbol)
 
         tag = "waiting"
         if best.change_percent is not None:
@@ -1743,6 +1812,8 @@ class StockPriceApp(tk.Tk):
                 display_name,
                 price,
                 percentage,
+                profit,
+                return_rate,
                 f"{quote_time} {best.timezone}",
             ),
             tags=(tag,) if tag else (),
@@ -1754,7 +1825,7 @@ class StockPriceApp(tk.Tk):
         if not tree.exists(symbol.canonical):
             return
         current = list(tree.item(symbol.canonical, "values"))
-        if len(current) == 5 and current[2] == "--":
+        if len(current) == len(TABLE_COLUMNS) and current[2] == "--":
             current[-1] = "获取失败"
             tree.item(symbol.canonical, values=current, tags=("waiting",))
         self._save_state()
