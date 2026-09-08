@@ -40,6 +40,8 @@ TABLE_COLUMNS = (
     "profit",
     "return",
 )
+TABLE_RESIZE_SPACER = "_resize_spacer"
+TREE_COLUMNS = (*TABLE_COLUMNS, TABLE_RESIZE_SPACER)
 TABLE_HEADINGS = {
     "code": "股票代码",
     "name": "中文名称",
@@ -973,7 +975,7 @@ class StockPriceApp(tk.Tk):
 
             tree = ttk.Treeview(
                 page,
-                columns=TABLE_COLUMNS,
+                columns=TREE_COLUMNS,
                 show="headings",
                 selectmode="extended",
             )
@@ -991,6 +993,14 @@ class StockPriceApp(tk.Tk):
                     anchor=tk.CENTER,
                     stretch=column in {"name", "profit"},
                 )
+            tree.heading(TABLE_RESIZE_SPACER, text="")
+            tree.column(
+                TABLE_RESIZE_SPACER,
+                width=16,
+                minwidth=16,
+                anchor=tk.CENTER,
+                stretch=False,
+            )
 
             tree.tag_configure("up", foreground=BUY_COLOR)
             tree.tag_configure("down", foreground=SELL_COLOR)
@@ -1227,7 +1237,7 @@ class StockPriceApp(tk.Tk):
             "window_geometry": f"{self.winfo_width()}x{self.winfo_height()}+0+0",
             "column_widths": {
                 column: int(layout_tree.column(column, "width"))
-                for column in layout_tree["columns"]
+                for column in TABLE_COLUMNS
             },
             "active_market": self._active_market(),
             "stocks": [],
