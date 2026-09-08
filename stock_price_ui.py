@@ -75,6 +75,28 @@ def _contains_chinese(value: str) -> bool:
     return any("\u3400" <= character <= "\u9fff" for character in value)
 
 
+def _center_and_show(
+    window: tk.Toplevel | tk.Tk,
+    owner: tk.Misc | None = None,
+    fit_content: bool = True,
+) -> None:
+    window.update_idletasks()
+    width = window.winfo_width()
+    height = window.winfo_height()
+    if fit_content:
+        width = max(width, window.winfo_reqwidth())
+        height = max(height, window.winfo_reqheight())
+    if owner is None:
+        x = max(0, (window.winfo_screenwidth() - width) // 2)
+        y = max(0, (window.winfo_screenheight() - height) // 2)
+    else:
+        owner.update_idletasks()
+        x = owner.winfo_rootx() + max(0, (owner.winfo_width() - width) // 2)
+        y = owner.winfo_rooty() + max(0, (owner.winfo_height() - height) // 2)
+    window.geometry(f"{width}x{height}+{x}+{y}")
+    window.deiconify()
+
+
 @dataclass(frozen=True)
 class TradeRecord:
     trade_date: str
@@ -91,6 +113,7 @@ class CalendarPopup(tk.Toplevel):
         on_select: Callable[[str], None],
     ) -> None:
         super().__init__(owner)
+        self.withdraw()
         self.configure(background=APP_BACKGROUND)
         self._on_select = on_select
         try:
@@ -151,15 +174,8 @@ class CalendarPopup(tk.Toplevel):
         ttk.Button(footer, text="取消", command=self._close).pack(side=tk.RIGHT)
 
         self._render_days()
+        _center_and_show(self, owner)
         self.grab_set()
-        self.after_idle(self._place_near_owner)
-
-    def _place_near_owner(self) -> None:
-        self.update_idletasks()
-        owner = self.master
-        x = owner.winfo_rootx() + max(0, (owner.winfo_width() - self.winfo_width()) // 2)
-        y = owner.winfo_rooty() + max(0, (owner.winfo_height() - self.winfo_height()) // 2)
-        self.geometry(f"+{x}+{y}")
 
     def _render_from_controls(self, _event: tk.Event | None = None) -> None:
         try:
@@ -267,6 +283,7 @@ class TradeEntryDialog(tk.Toplevel):
         initial_record: TradeRecord | None = None,
     ) -> None:
         super().__init__(owner)
+        self.withdraw()
         self.configure(background=APP_BACKGROUND)
         self._on_save = on_save
         self.title("修改交易" if initial_record is not None else "增加交易")
@@ -384,8 +401,9 @@ class TradeEntryDialog(tk.Toplevel):
 
         self.bind("<Return>", lambda _event: self._submit())
         self.bind("<Escape>", lambda _event: self.destroy())
+        _center_and_show(self, owner)
         self.grab_set()
-        self.after_idle(self._place_and_focus)
+        self.price_entry.focus_set()
 
     def _open_calendar(self, _event: tk.Event | None = None) -> str:
         CalendarPopup(self, self.date_var.get(), self.date_var.set)
@@ -395,14 +413,6 @@ class TradeEntryDialog(tk.Toplevel):
         return proposed_value == "" or (
             proposed_value.isascii() and proposed_value.isdigit()
         )
-
-    def _place_and_focus(self) -> None:
-        self.update_idletasks()
-        owner = self.master
-        x = owner.winfo_rootx() + max(0, (owner.winfo_width() - self.winfo_width()) // 2)
-        y = owner.winfo_rooty() + max(0, (owner.winfo_height() - self.winfo_height()) // 2)
-        self.geometry(f"+{x}+{y}")
-        self.price_entry.focus_set()
 
     def _submit(self) -> None:
         raw_date = self.date_var.get().strip()
@@ -465,6 +475,7 @@ class StockTradeWindow(tk.Toplevel):
         display_name: str,
     ) -> None:
         super().__init__(owner)
+        self.withdraw()
         self.configure(background=APP_BACKGROUND)
         self.owner = owner
         self.symbol = symbol
@@ -541,6 +552,7 @@ class StockTradeWindow(tk.Toplevel):
             style="Hint.TLabel",
         ).pack(anchor=tk.W, pady=(10, 0))
         self._reload_records()
+        _center_and_show(self, owner, fit_content=False)
 
     def _reload_records(self) -> None:
         self.trade_tree.delete(*self.trade_tree.get_children(""))
@@ -642,6 +654,7 @@ class StockTradeWindow(tk.Toplevel):
 class StockPriceApp(tk.Tk):
     def __init__(self, state_path: Path | None = None) -> None:
         super().__init__()
+        self.withdraw()
         self.configure(background=APP_BACKGROUND)
         self.title("美股 / 港股行情")
         self.geometry("1050x600")
@@ -670,6 +683,7 @@ class StockPriceApp(tk.Tk):
         self._build_ui()
         self._restore_state()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        _center_and_show(self, fit_content=False)
         self._queue_after_id = self.after(100, self._process_result_queue)
 
     def _configure_style(self) -> None:
@@ -804,13 +818,18 @@ class StockPriceApp(tk.Tk):
             "TNotebook.Tab",
             background=SURFACE_MUTED,
             foreground=TEXT_SECONDARY,
-            padding=(20, 8),
-            font=("Microsoft YaHei UI", 10, "bold"),
+            padding=(16, 6),
+            font=("Microsoft YaHei UI", 10),
         )
         style.map(
             "TNotebook.Tab",
-            background=[("selected", SURFACE), ("active", ACCENT_SOFT)],
-            foreground=[("selected", ACCENT), ("active", TEXT_PRIMARY)],
+            background=[("selected", ACCENT), ("active", ACCENT_SOFT)],
+            foreground=[("selected", SURFACE), ("active", TEXT_PRIMARY)],
+            font=[
+                ("selected", ("Microsoft YaHei UI", 12, "bold")),
+                ("!selected", ("Microsoft YaHei UI", 10)),
+            ],
+            padding=[("selected", (22, 10)), ("!selected", (16, 6))],
         )
         style.configure(
             "Treeview",
@@ -1022,9 +1041,7 @@ class StockPriceApp(tk.Tk):
         screen_height = self.winfo_screenheight()
         width = max(820, min(int(match.group("width")), screen_width))
         height = max(430, min(int(match.group("height")), screen_height))
-        x = max(0, min(int(match.group("x")), max(0, screen_width - width)))
-        y = max(0, min(int(match.group("y")), max(0, screen_height - height)))
-        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.geometry(f"{width}x{height}")
         return True
 
     def _active_market(self) -> str:
@@ -1202,7 +1219,7 @@ class StockPriceApp(tk.Tk):
         payload = {
             "version": STATE_VERSION,
             "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-            "window_geometry": self.geometry(),
+            "window_geometry": f"{self.winfo_width()}x{self.winfo_height()}+0+0",
             "column_widths": {
                 market: {
                     column: int(tree.column(column, "width"))
