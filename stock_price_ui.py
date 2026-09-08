@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import queue
@@ -11,7 +12,7 @@ import threading
 import tkinter as tk
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -46,7 +47,7 @@ DEFAULT_COLUMN_WIDTHS = {
     "change": 90,
     "time": 220,
 }
-STATE_VERSION = 3
+STATE_VERSION = 4
 WINDOW_GEOMETRY_PATTERN = re.compile(
     r"^(?P<width>\d+)x(?P<height>\d+)(?P<x>[+-]\d+)(?P<y>[+-]\d+)$"
 )
@@ -65,8 +66,179 @@ def _contains_chinese(value: str) -> bool:
 
 @dataclass(frozen=True)
 class TradeRecord:
-    trade_time: str
+    trade_date: str
     price: str
+    quantity: str
+    trade_type: str
+
+
+class CalendarPopup(tk.Toplevel):
+    def __init__(
+        self,
+        owner: tk.Toplevel,
+        selected_date: str,
+        on_select: Callable[[str], None],
+    ) -> None:
+        super().__init__(owner)
+        self._on_select = on_select
+        try:
+            initial_date = datetime.strptime(selected_date, "%Y-%m-%d").date()
+        except ValueError:
+            initial_date = date.today()
+        self._selected_date = initial_date
+        self._year = initial_date.year
+        self._month = initial_date.month
+
+        self.title("选择交易日期")
+        self.resizable(False, False)
+        self.transient(owner)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+        outer = ttk.Frame(self, padding=(14, 12, 14, 12))
+        outer.pack(fill=tk.BOTH, expand=True)
+        controls = ttk.Frame(outer)
+        controls.pack(fill=tk.X, pady=(0, 8))
+        ttk.Button(controls, text="‹", width=3, command=self._previous_month).pack(
+            side=tk.LEFT
+        )
+        self.year_var = tk.IntVar(value=self._year)
+        year_spinner = ttk.Spinbox(
+            controls,
+            from_=1900,
+            to=2100,
+            textvariable=self.year_var,
+            width=7,
+            command=self._render_from_controls,
+        )
+        year_spinner.pack(side=tk.LEFT, padx=(18, 4))
+        ttk.Label(controls, text="年").pack(side=tk.LEFT)
+        self.month_var = tk.IntVar(value=self._month)
+        month_spinner = ttk.Spinbox(
+            controls,
+            from_=1,
+            to=12,
+            textvariable=self.month_var,
+            width=4,
+            command=self._render_from_controls,
+        )
+        month_spinner.pack(side=tk.LEFT, padx=(10, 4))
+        ttk.Label(controls, text="月").pack(side=tk.LEFT)
+        ttk.Button(controls, text="›", width=3, command=self._next_month).pack(
+            side=tk.RIGHT
+        )
+        year_spinner.bind("<Return>", self._render_from_controls)
+        month_spinner.bind("<Return>", self._render_from_controls)
+        year_spinner.bind("<FocusOut>", self._render_from_controls)
+        month_spinner.bind("<FocusOut>", self._render_from_controls)
+
+        self.days_frame = ttk.Frame(outer)
+        self.days_frame.pack(fill=tk.BOTH, expand=True)
+        footer = ttk.Frame(outer)
+        footer.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(footer, text="今天", command=self._select_today).pack(side=tk.LEFT)
+        ttk.Button(footer, text="取消", command=self._close).pack(side=tk.RIGHT)
+
+        self._render_days()
+        self.grab_set()
+        self.after_idle(self._place_near_owner)
+
+    def _place_near_owner(self) -> None:
+        self.update_idletasks()
+        owner = self.master
+        x = owner.winfo_rootx() + max(0, (owner.winfo_width() - self.winfo_width()) // 2)
+        y = owner.winfo_rooty() + max(0, (owner.winfo_height() - self.winfo_height()) // 2)
+        self.geometry(f"+{x}+{y}")
+
+    def _render_from_controls(self, _event: tk.Event | None = None) -> None:
+        try:
+            year = int(self.year_var.get())
+            month = int(self.month_var.get())
+        except (tk.TclError, ValueError):
+            return
+        if not 1900 <= year <= 2100 or not 1 <= month <= 12:
+            return
+        self._year = year
+        self._month = month
+        self._render_days()
+
+    def _change_month(self, offset: int) -> None:
+        month_index = self._year * 12 + self._month - 1 + offset
+        year, zero_based_month = divmod(month_index, 12)
+        if not 1900 <= year <= 2100:
+            return
+        self._year = year
+        self._month = zero_based_month + 1
+        self.year_var.set(self._year)
+        self.month_var.set(self._month)
+        self._render_days()
+
+    def _previous_month(self) -> None:
+        self._change_month(-1)
+
+    def _next_month(self) -> None:
+        self._change_month(1)
+
+    def _render_days(self) -> None:
+        for widget in self.days_frame.winfo_children():
+            widget.destroy()
+        for column, weekday in enumerate(("一", "二", "三", "四", "五", "六", "日")):
+            ttk.Label(self.days_frame, text=weekday, anchor=tk.CENTER).grid(
+                row=0,
+                column=column,
+                padx=2,
+                pady=2,
+                sticky="ew",
+            )
+            self.days_frame.columnconfigure(column, weight=1)
+
+        weeks = calendar.Calendar(firstweekday=0).monthdayscalendar(
+            self._year,
+            self._month,
+        )
+        for row, week in enumerate(weeks, start=1):
+            for column, day_number in enumerate(week):
+                if not day_number:
+                    ttk.Label(self.days_frame, text="", width=4).grid(
+                        row=row,
+                        column=column,
+                        padx=2,
+                        pady=2,
+                    )
+                    continue
+                is_selected = (
+                    self._selected_date.year == self._year
+                    and self._selected_date.month == self._month
+                    and self._selected_date.day == day_number
+                )
+                ttk.Button(
+                    self.days_frame,
+                    text=str(day_number),
+                    width=4,
+                    style="SelectedDay.TButton" if is_selected else "TButton",
+                    command=lambda day=day_number: self._select_day(day),
+                ).grid(row=row, column=column, padx=2, pady=2)
+
+    def _select_day(self, day_number: int) -> None:
+        chosen = date(self._year, self._month, day_number)
+        self._on_select(chosen.isoformat())
+        self._close()
+
+    def _select_today(self) -> None:
+        self._on_select(date.today().isoformat())
+        self._close()
+
+    def _close(self) -> None:
+        owner = self.master
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+        try:
+            if owner.winfo_exists():
+                owner.grab_set()
+        except tk.TclError:
+            pass
 
 
 class TradeEntryDialog(tk.Toplevel):
@@ -75,10 +247,11 @@ class TradeEntryDialog(tk.Toplevel):
         owner: tk.Toplevel,
         currency: str,
         on_save: Callable[[TradeRecord], bool],
+        initial_record: TradeRecord | None = None,
     ) -> None:
         super().__init__(owner)
         self._on_save = on_save
-        self.title("增加交易")
+        self.title("修改交易" if initial_record is not None else "增加交易")
         self.resizable(False, False)
         self.transient(owner)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
@@ -86,38 +259,97 @@ class TradeEntryDialog(tk.Toplevel):
         content = ttk.Frame(self, padding=(22, 18, 22, 16))
         content.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(content, text="交易时间").grid(
+        ttk.Label(content, text="交易日期").grid(
             row=0,
             column=0,
             sticky=tk.W,
             pady=(0, 12),
         )
-        self.time_var = tk.StringVar(
-            value=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.date_var = tk.StringVar(
+            value=(
+                initial_record.trade_date
+                if initial_record is not None
+                else date.today().isoformat()
+            )
         )
-        self.time_entry = ttk.Entry(
-            content,
-            textvariable=self.time_var,
-            width=28,
+        date_controls = ttk.Frame(content)
+        date_controls.grid(row=0, column=1, sticky=tk.EW, pady=(0, 12))
+        self.date_entry = ttk.Entry(
+            date_controls,
+            textvariable=self.date_var,
+            width=18,
+            state="readonly",
         )
-        self.time_entry.grid(row=0, column=1, sticky=tk.EW, pady=(0, 12))
+        self.date_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(
+            date_controls,
+            text="选择日期",
+            command=self._open_calendar,
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
-        ttk.Label(content, text=f"交易价格（{currency}）").grid(
+        ttk.Label(content, text="交易类型").grid(
             row=1,
             column=0,
             sticky=tk.W,
-            pady=(0, 16),
+            pady=(0, 12),
         )
-        self.price_var = tk.StringVar()
+        initial_type = (
+            initial_record.trade_type
+            if initial_record is not None
+            and initial_record.trade_type in {"买入", "卖出"}
+            else "买入"
+        )
+        self.trade_type_var = tk.StringVar(value=initial_type)
+        type_controls = ttk.Frame(content)
+        type_controls.grid(row=1, column=1, sticky=tk.W, pady=(0, 12))
+        ttk.Radiobutton(
+            type_controls,
+            text="买入",
+            value="买入",
+            variable=self.trade_type_var,
+        ).pack(side=tk.LEFT, padx=(0, 18))
+        ttk.Radiobutton(
+            type_controls,
+            text="卖出",
+            value="卖出",
+            variable=self.trade_type_var,
+        ).pack(side=tk.LEFT)
+
+        ttk.Label(content, text=f"交易价格（{currency}）").grid(
+            row=2,
+            column=0,
+            sticky=tk.W,
+            pady=(0, 12),
+        )
+        self.price_var = tk.StringVar(
+            value=initial_record.price if initial_record is not None else ""
+        )
         self.price_entry = ttk.Entry(
             content,
             textvariable=self.price_var,
             width=28,
         )
-        self.price_entry.grid(row=1, column=1, sticky=tk.EW, pady=(0, 16))
+        self.price_entry.grid(row=2, column=1, sticky=tk.EW, pady=(0, 12))
+
+        ttk.Label(content, text="交易份额").grid(
+            row=3,
+            column=0,
+            sticky=tk.W,
+            pady=(0, 16),
+        )
+        initial_quantity = ""
+        if initial_record is not None and initial_record.quantity != "--":
+            initial_quantity = initial_record.quantity
+        self.quantity_var = tk.StringVar(value=initial_quantity)
+        self.quantity_entry = ttk.Entry(
+            content,
+            textvariable=self.quantity_var,
+            width=28,
+        )
+        self.quantity_entry.grid(row=3, column=1, sticky=tk.EW, pady=(0, 16))
 
         buttons = ttk.Frame(content)
-        buttons.grid(row=2, column=0, columnspan=2, sticky=tk.E)
+        buttons.grid(row=4, column=0, columnspan=2, sticky=tk.E)
         ttk.Button(buttons, text="取消", command=self.destroy).pack(
             side=tk.LEFT,
             padx=(0, 8),
@@ -135,6 +367,9 @@ class TradeEntryDialog(tk.Toplevel):
         self.grab_set()
         self.after_idle(self._place_and_focus)
 
+    def _open_calendar(self) -> None:
+        CalendarPopup(self, self.date_var.get(), self.date_var.set)
+
     def _place_and_focus(self) -> None:
         self.update_idletasks()
         owner = self.master
@@ -144,21 +379,15 @@ class TradeEntryDialog(tk.Toplevel):
         self.price_entry.focus_set()
 
     def _submit(self) -> None:
-        raw_time = self.time_var.get().strip()
-        parsed_time: datetime | None = None
-        for time_format in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
-            try:
-                parsed_time = datetime.strptime(raw_time, time_format)
-                break
-            except ValueError:
-                continue
-        if parsed_time is None:
+        raw_date = self.date_var.get().strip()
+        try:
+            parsed_date = datetime.strptime(raw_date, "%Y-%m-%d").date()
+        except ValueError:
             messagebox.showerror(
-                "交易时间格式错误",
-                "请输入 YYYY-MM-DD HH:MM 或 YYYY-MM-DD HH:MM:SS 格式的时间。",
+                "交易日期错误",
+                "请通过日历选择有效的交易日期。",
                 parent=self,
             )
-            self.time_entry.focus_set()
             return
 
         raw_price = self.price_var.get().strip().replace(",", "")
@@ -175,10 +404,27 @@ class TradeEntryDialog(tk.Toplevel):
             self.price_entry.focus_set()
             return
 
+        raw_quantity = self.quantity_var.get().strip().replace(",", "")
+        try:
+            quantity_value = Decimal(raw_quantity)
+        except InvalidOperation:
+            quantity_value = Decimal(0)
+        if not quantity_value.is_finite() or quantity_value <= 0:
+            messagebox.showerror(
+                "交易份额错误",
+                "请输入大于 0 的有效交易份额。",
+                parent=self,
+            )
+            self.quantity_entry.focus_set()
+            return
+
         normalized_price = format(price_value.normalize(), "f")
+        normalized_quantity = format(quantity_value.normalize(), "f")
         record = TradeRecord(
-            trade_time=parsed_time.strftime("%Y-%m-%d %H:%M:%S"),
+            trade_date=parsed_date.isoformat(),
             price=normalized_price,
+            quantity=normalized_quantity,
+            trade_type=self.trade_type_var.get(),
         )
         if self._on_save(record):
             self.destroy()
@@ -222,13 +468,18 @@ class StockTradeWindow(tk.Toplevel):
         table_frame.pack(fill=tk.BOTH, expand=True)
         self.trade_tree = ttk.Treeview(
             table_frame,
-            columns=("trade_time", "price"),
+            columns=("trade_date", "trade_type", "price", "quantity"),
             show="headings",
+            selectmode="browse",
         )
-        self.trade_tree.heading("trade_time", text="交易时间", anchor=tk.CENTER)
+        self.trade_tree.heading("trade_date", text="交易日期", anchor=tk.CENTER)
+        self.trade_tree.heading("trade_type", text="交易类型", anchor=tk.CENTER)
         self.trade_tree.heading("price", text="交易价格", anchor=tk.CENTER)
-        self.trade_tree.column("trade_time", width=280, anchor=tk.CENTER)
-        self.trade_tree.column("price", width=220, anchor=tk.CENTER)
+        self.trade_tree.heading("quantity", text="交易份额", anchor=tk.CENTER)
+        self.trade_tree.column("trade_date", width=150, anchor=tk.CENTER)
+        self.trade_tree.column("trade_type", width=100, anchor=tk.CENTER)
+        self.trade_tree.column("price", width=160, anchor=tk.CENTER)
+        self.trade_tree.column("quantity", width=140, anchor=tk.CENTER)
         scrollbar = ttk.Scrollbar(
             table_frame,
             orient=tk.VERTICAL,
@@ -240,9 +491,14 @@ class StockTradeWindow(tk.Toplevel):
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
 
+        self.context_menu = tk.Menu(self, tearoff=False)
+        self.context_menu.add_command(label="修改", command=self._modify_selected)
+        self.context_menu.add_command(label="删除", command=self._delete_selected)
+        self.trade_tree.bind("<Button-3>", self._show_context_menu)
+
         ttk.Label(
             outer,
-            text="交易记录保存在本机；行情接口价格不会作为交易记录保存。",
+            text="右键交易记录可修改或删除；行情接口价格不会作为交易记录保存。",
             style="Hint.TLabel",
         ).pack(anchor=tk.W, pady=(10, 0))
         self._reload_records()
@@ -256,7 +512,12 @@ class StockTradeWindow(tk.Toplevel):
                 "",
                 tk.END,
                 iid=f"trade-{index}",
-                values=(record.trade_time, f"{record.price} {self.currency}"),
+                values=(
+                    record.trade_date,
+                    record.trade_type,
+                    f"{record.price} {self.currency}",
+                    record.quantity,
+                ),
             )
 
     def _open_entry_dialog(self) -> None:
@@ -272,6 +533,66 @@ class StockTradeWindow(tk.Toplevel):
             return False
         self._reload_records()
         return True
+
+    def _selected_record_index(self) -> int | None:
+        selection = self.trade_tree.selection()
+        if not selection or not selection[0].startswith("trade-"):
+            return None
+        try:
+            index = int(selection[0].removeprefix("trade-"))
+        except ValueError:
+            return None
+        records = self.owner.trades.get(self.symbol.canonical, [])
+        return index if 0 <= index < len(records) else None
+
+    def _show_context_menu(self, event: tk.Event) -> str | None:
+        item_id = self.trade_tree.identify_row(event.y)
+        if not item_id:
+            return None
+        self.trade_tree.selection_set(item_id)
+        self.trade_tree.focus(item_id)
+        try:
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.context_menu.grab_release()
+        return "break"
+
+    def _modify_selected(self) -> None:
+        index = self._selected_record_index()
+        if index is None:
+            return
+        record = self.owner.trades[self.symbol.canonical][index]
+        TradeEntryDialog(
+            self,
+            self.currency,
+            lambda updated: self._save_updated_record(index, updated),
+            initial_record=record,
+        )
+
+    def _save_updated_record(self, index: int, record: TradeRecord) -> bool:
+        if not self.owner._update_trade_record(self.symbol, index, record):
+            messagebox.showerror(
+                "保存失败",
+                "修改后的交易记录未能写入本机保存文件，请检查目录权限后重试。",
+                parent=self,
+            )
+            return False
+        self._reload_records()
+        self.trade_tree.selection_set(f"trade-{index}")
+        return True
+
+    def _delete_selected(self) -> None:
+        index = self._selected_record_index()
+        if index is None:
+            return
+        if not self.owner._delete_trade_record(self.symbol, index):
+            messagebox.showerror(
+                "删除失败",
+                "交易记录未能从本机保存文件中删除，请检查目录权限后重试。",
+                parent=self,
+            )
+            return
+        self._reload_records()
 
     def _close(self) -> None:
         self.owner._trade_windows.pop(self.symbol.canonical, None)
@@ -332,6 +653,10 @@ class StockPriceApp(tk.Tk):
         )
         style.configure("Primary.TButton", padding=(16, 7))
         style.configure("Action.TButton", padding=(16, 7))
+        style.configure(
+            "SelectedDay.TButton",
+            font=("Microsoft YaHei UI", 10, "bold"),
+        )
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self, padding=(22, 18, 22, 14))
@@ -531,7 +856,12 @@ class StockPriceApp(tk.Tk):
 
         try:
             payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict) or payload.get("version") not in {1, 2, 3}:
+            if not isinstance(payload, dict) or payload.get("version") not in {
+                1,
+                2,
+                3,
+                4,
+            }:
                 raise ValueError("保存文件版本不受支持")
 
             layout_restored = self._restore_geometry(payload.get("window_geometry"))
@@ -593,7 +923,10 @@ class StockPriceApp(tk.Tk):
                         first_restored_market = symbol.market
 
             saved_trades = payload.get("trades")
-            if isinstance(saved_trades, dict):
+            if payload.get("version") == STATE_VERSION and isinstance(
+                saved_trades,
+                dict,
+            ):
                 for raw_symbol, raw_records in saved_trades.items():
                     try:
                         trade_symbol = normalize_symbol(str(raw_symbol))
@@ -605,11 +938,30 @@ class StockPriceApp(tk.Tk):
                     for raw_record in raw_records:
                         if not isinstance(raw_record, dict):
                             continue
-                        trade_time = str(raw_record.get("trade_time") or "").strip()
+                        trade_date = str(raw_record.get("trade_date") or "").strip()
                         price = str(raw_record.get("price") or "").strip()
-                        if trade_time and price:
+                        quantity = str(raw_record.get("quantity") or "").strip()
+                        trade_type = str(raw_record.get("trade_type") or "").strip()
+                        try:
+                            datetime.strptime(trade_date, "%Y-%m-%d")
+                            price_value = Decimal(price)
+                            quantity_value = Decimal(quantity)
+                        except (ValueError, InvalidOperation):
+                            continue
+                        if (
+                            price_value.is_finite()
+                            and price_value > 0
+                            and quantity_value.is_finite()
+                            and quantity_value > 0
+                            and trade_type in {"买入", "卖出"}
+                        ):
                             records.append(
-                                TradeRecord(trade_time=trade_time, price=price)
+                                TradeRecord(
+                                    trade_date=trade_date,
+                                    price=price,
+                                    quantity=quantity,
+                                    trade_type=trade_type,
+                                )
                             )
                     if records:
                         self.trades[trade_symbol.canonical] = records
@@ -651,8 +1003,10 @@ class StockPriceApp(tk.Tk):
             "trades": {
                 symbol: [
                     {
-                        "trade_time": record.trade_time,
+                        "trade_date": record.trade_date,
                         "price": record.price,
+                        "quantity": record.quantity,
+                        "trade_type": record.trade_type,
                     }
                     for record in records
                 ]
@@ -993,12 +1347,46 @@ class StockPriceApp(tk.Tk):
         records.append(record)
         if self._save_state():
             self.status_var.set(
-                f"已保存 {symbol.canonical} 的交易记录：{record.trade_time}。"
+                f"已保存 {symbol.canonical} 的{record.trade_type}记录：{record.trade_date}。"
             )
             return True
         records.pop()
         if not records:
             self.trades.pop(symbol.canonical, None)
+        return False
+
+    def _update_trade_record(
+        self,
+        symbol: StockSymbol,
+        index: int,
+        record: TradeRecord,
+    ) -> bool:
+        records = self.trades.get(symbol.canonical, [])
+        if not 0 <= index < len(records):
+            return False
+        previous = records[index]
+        records[index] = record
+        if self._save_state():
+            self.status_var.set(
+                f"已修改 {symbol.canonical} 的交易记录：{record.trade_date}。"
+            )
+            return True
+        records[index] = previous
+        return False
+
+    def _delete_trade_record(self, symbol: StockSymbol, index: int) -> bool:
+        records = self.trades.get(symbol.canonical, [])
+        if not 0 <= index < len(records):
+            return False
+        deleted = records.pop(index)
+        if self._save_state():
+            if not records:
+                self.trades.pop(symbol.canonical, None)
+            self.status_var.set(
+                f"已删除 {symbol.canonical} 的交易记录：{deleted.trade_date}。"
+            )
+            return True
+        records.insert(index, deleted)
         return False
 
     def remove_selected(self, event: tk.Event | None = None) -> None:
