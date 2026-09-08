@@ -47,6 +47,17 @@ DEFAULT_COLUMN_WIDTHS = {
     "change": 90,
     "time": 220,
 }
+APP_BACKGROUND = "#F4F7FB"
+SURFACE = "#FFFFFF"
+SURFACE_MUTED = "#EAF0F8"
+TEXT_PRIMARY = "#172033"
+TEXT_SECONDARY = "#667085"
+ACCENT = "#2563EB"
+ACCENT_HOVER = "#1D4ED8"
+ACCENT_SOFT = "#DBEAFE"
+BUY_COLOR = "#DC2626"
+SELL_COLOR = "#059669"
+DIVIDER = "#D7E0EC"
 STATE_VERSION = 4
 WINDOW_GEOMETRY_PATTERN = re.compile(
     r"^(?P<width>\d+)x(?P<height>\d+)(?P<x>[+-]\d+)(?P<y>[+-]\d+)$"
@@ -80,6 +91,7 @@ class CalendarPopup(tk.Toplevel):
         on_select: Callable[[str], None],
     ) -> None:
         super().__init__(owner)
+        self.configure(background=APP_BACKGROUND)
         self._on_select = on_select
         try:
             initial_date = datetime.strptime(selected_date, "%Y-%m-%d").date()
@@ -182,7 +194,12 @@ class CalendarPopup(tk.Toplevel):
         for widget in self.days_frame.winfo_children():
             widget.destroy()
         for column, weekday in enumerate(("一", "二", "三", "四", "五", "六", "日")):
-            ttk.Label(self.days_frame, text=weekday, anchor=tk.CENTER).grid(
+            ttk.Label(
+                self.days_frame,
+                text=weekday,
+                anchor=tk.CENTER,
+                style="Weekend.TLabel" if column >= 5 else "TLabel",
+            ).grid(
                 row=0,
                 column=column,
                 padx=2,
@@ -250,6 +267,7 @@ class TradeEntryDialog(tk.Toplevel):
         initial_record: TradeRecord | None = None,
     ) -> None:
         super().__init__(owner)
+        self.configure(background=APP_BACKGROUND)
         self._on_save = on_save
         self.title("修改交易" if initial_record is not None else "增加交易")
         self.resizable(False, False)
@@ -307,12 +325,14 @@ class TradeEntryDialog(tk.Toplevel):
             text="买入",
             value="买入",
             variable=self.trade_type_var,
+            style="Buy.TRadiobutton",
         ).pack(side=tk.LEFT, padx=(0, 18))
         ttk.Radiobutton(
             type_controls,
             text="卖出",
             value="卖出",
             variable=self.trade_type_var,
+            style="Sell.TRadiobutton",
         ).pack(side=tk.LEFT)
 
         ttk.Label(content, text=f"交易价格（{currency}）").grid(
@@ -345,6 +365,11 @@ class TradeEntryDialog(tk.Toplevel):
             content,
             textvariable=self.quantity_var,
             width=28,
+            validate="key",
+            validatecommand=(
+                self.register(self._validate_quantity_input),
+                "%P",
+            ),
         )
         self.quantity_entry.grid(row=3, column=1, sticky=tk.EW, pady=(0, 16))
 
@@ -369,6 +394,11 @@ class TradeEntryDialog(tk.Toplevel):
 
     def _open_calendar(self) -> None:
         CalendarPopup(self, self.date_var.get(), self.date_var.set)
+
+    def _validate_quantity_input(self, proposed_value: str) -> bool:
+        return proposed_value == "" or (
+            proposed_value.isascii() and proposed_value.isdigit()
+        )
 
     def _place_and_focus(self) -> None:
         self.update_idletasks()
@@ -404,22 +434,23 @@ class TradeEntryDialog(tk.Toplevel):
             self.price_entry.focus_set()
             return
 
-        raw_quantity = self.quantity_var.get().strip().replace(",", "")
-        try:
-            quantity_value = Decimal(raw_quantity)
-        except InvalidOperation:
-            quantity_value = Decimal(0)
-        if not quantity_value.is_finite() or quantity_value <= 0:
+        raw_quantity = self.quantity_var.get().strip()
+        if not (
+            raw_quantity
+            and raw_quantity.isascii()
+            and raw_quantity.isdigit()
+            and int(raw_quantity) > 0
+        ):
             messagebox.showerror(
                 "交易份额错误",
-                "请输入大于 0 的有效交易份额。",
+                "交易份额必须是大于 0 的整数。",
                 parent=self,
             )
             self.quantity_entry.focus_set()
             return
 
         normalized_price = format(price_value.normalize(), "f")
-        normalized_quantity = format(quantity_value.normalize(), "f")
+        normalized_quantity = str(int(raw_quantity))
         record = TradeRecord(
             trade_date=parsed_date.isoformat(),
             price=normalized_price,
@@ -438,6 +469,7 @@ class StockTradeWindow(tk.Toplevel):
         display_name: str,
     ) -> None:
         super().__init__(owner)
+        self.configure(background=APP_BACKGROUND)
         self.owner = owner
         self.symbol = symbol
         self.currency = "USD" if symbol.market == "US" else "HKD"
@@ -480,6 +512,8 @@ class StockTradeWindow(tk.Toplevel):
         self.trade_tree.column("trade_type", width=100, anchor=tk.CENTER)
         self.trade_tree.column("price", width=160, anchor=tk.CENTER)
         self.trade_tree.column("quantity", width=140, anchor=tk.CENTER)
+        self.trade_tree.tag_configure("buy", foreground=BUY_COLOR)
+        self.trade_tree.tag_configure("sell", foreground=SELL_COLOR)
         scrollbar = ttk.Scrollbar(
             table_frame,
             orient=tk.VERTICAL,
@@ -491,7 +525,16 @@ class StockTradeWindow(tk.Toplevel):
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
 
-        self.context_menu = tk.Menu(self, tearoff=False)
+        self.context_menu = tk.Menu(
+            self,
+            tearoff=False,
+            background=SURFACE,
+            foreground=TEXT_PRIMARY,
+            activebackground=ACCENT_SOFT,
+            activeforeground=TEXT_PRIMARY,
+            borderwidth=1,
+            relief=tk.FLAT,
+        )
         self.context_menu.add_command(label="修改", command=self._modify_selected)
         self.context_menu.add_command(label="删除", command=self._delete_selected)
         self.trade_tree.bind("<Button-3>", self._show_context_menu)
@@ -518,6 +561,7 @@ class StockTradeWindow(tk.Toplevel):
                     f"{record.price} {self.currency}",
                     record.quantity,
                 ),
+                tags=("buy",) if record.trade_type == "买入" else ("sell",),
             )
 
     def _open_entry_dialog(self) -> None:
@@ -602,6 +646,7 @@ class StockTradeWindow(tk.Toplevel):
 class StockPriceApp(tk.Tk):
     def __init__(self, state_path: Path | None = None) -> None:
         super().__init__()
+        self.configure(background=APP_BACKGROUND)
         self.title("美股 / 港股行情")
         self.geometry("1050x600")
         self.minsize(820, 430)
@@ -640,22 +685,191 @@ class StockPriceApp(tk.Tk):
 
         style = ttk.Style(self)
         available = style.theme_names()
-        if "vista" in available:
-            style.theme_use("vista")
-        elif "clam" in available:
+        if "clam" in available:
             style.theme_use("clam")
+        elif "vista" in available:
+            style.theme_use("vista")
 
-        style.configure("Title.TLabel", font=("Microsoft YaHei UI", 18, "bold"))
-        style.configure("Hint.TLabel", foreground="#5f6368")
-        style.configure("Treeview", rowheight=30, font=("Microsoft YaHei UI", 10))
+        style.configure("TFrame", background=APP_BACKGROUND)
         style.configure(
-            "Treeview.Heading", font=("Microsoft YaHei UI", 10, "bold")
+            "TLabel",
+            background=APP_BACKGROUND,
+            foreground=TEXT_PRIMARY,
         )
-        style.configure("Primary.TButton", padding=(16, 7))
-        style.configure("Action.TButton", padding=(16, 7))
+        style.configure(
+            "Title.TLabel",
+            background=APP_BACKGROUND,
+            foreground=TEXT_PRIMARY,
+            font=("Microsoft YaHei UI", 18, "bold"),
+        )
+        style.configure(
+            "Hint.TLabel",
+            background=APP_BACKGROUND,
+            foreground=TEXT_SECONDARY,
+        )
+        style.configure(
+            "Weekend.TLabel",
+            background=APP_BACKGROUND,
+            foreground=BUY_COLOR,
+        )
+        style.configure(
+            "TEntry",
+            fieldbackground=SURFACE,
+            foreground=TEXT_PRIMARY,
+            bordercolor=DIVIDER,
+            lightcolor=DIVIDER,
+            darkcolor=DIVIDER,
+            padding=5,
+        )
+        style.map(
+            "TEntry",
+            bordercolor=[("focus", ACCENT)],
+            lightcolor=[("focus", ACCENT)],
+            darkcolor=[("focus", ACCENT)],
+        )
+        style.configure(
+            "TSpinbox",
+            fieldbackground=SURFACE,
+            foreground=TEXT_PRIMARY,
+            arrowcolor=ACCENT,
+            bordercolor=DIVIDER,
+            lightcolor=DIVIDER,
+            darkcolor=DIVIDER,
+            padding=4,
+        )
+        style.configure(
+            "TButton",
+            background=SURFACE_MUTED,
+            foreground=TEXT_PRIMARY,
+            bordercolor=DIVIDER,
+            lightcolor=DIVIDER,
+            darkcolor=DIVIDER,
+            padding=(12, 7),
+        )
+        style.map(
+            "TButton",
+            background=[("active", ACCENT_SOFT), ("pressed", "#BFDBFE")],
+            foreground=[("active", TEXT_PRIMARY)],
+        )
+        style.configure(
+            "Primary.TButton",
+            background=ACCENT,
+            foreground=SURFACE,
+            bordercolor=ACCENT,
+            lightcolor=ACCENT,
+            darkcolor=ACCENT,
+            padding=(16, 8),
+        )
+        style.map(
+            "Primary.TButton",
+            background=[
+                ("disabled", "#AFC5EE"),
+                ("pressed", "#1E40AF"),
+                ("active", ACCENT_HOVER),
+            ],
+            foreground=[("disabled", "#F8FAFC"), ("active", SURFACE)],
+        )
+        style.configure(
+            "Action.TButton",
+            background=SURFACE,
+            foreground=ACCENT,
+            bordercolor=ACCENT,
+            lightcolor=ACCENT,
+            darkcolor=ACCENT,
+            padding=(16, 8),
+        )
+        style.map(
+            "Action.TButton",
+            background=[("active", ACCENT_SOFT), ("pressed", "#BFDBFE")],
+            foreground=[("disabled", "#98A2B3"), ("active", ACCENT_HOVER)],
+        )
+        style.configure(
+            "TRadiobutton",
+            background=APP_BACKGROUND,
+            foreground=TEXT_PRIMARY,
+            padding=(0, 3),
+        )
+        style.configure("Buy.TRadiobutton", foreground=BUY_COLOR)
+        style.configure("Sell.TRadiobutton", foreground=SELL_COLOR)
+        style.map(
+            "TRadiobutton",
+            background=[("active", APP_BACKGROUND)],
+            indicatorcolor=[("selected", ACCENT), ("!selected", SURFACE)],
+        )
+        style.configure(
+            "TNotebook",
+            background=APP_BACKGROUND,
+            bordercolor=DIVIDER,
+            lightcolor=DIVIDER,
+            darkcolor=DIVIDER,
+            tabmargins=(0, 2, 0, 0),
+        )
+        style.configure(
+            "TNotebook.Tab",
+            background=SURFACE_MUTED,
+            foreground=TEXT_SECONDARY,
+            padding=(20, 8),
+            font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", SURFACE), ("active", ACCENT_SOFT)],
+            foreground=[("selected", ACCENT), ("active", TEXT_PRIMARY)],
+        )
+        style.configure(
+            "Treeview",
+            background=SURFACE,
+            fieldbackground=SURFACE,
+            foreground=TEXT_PRIMARY,
+            bordercolor=DIVIDER,
+            lightcolor=DIVIDER,
+            darkcolor=DIVIDER,
+            rowheight=32,
+            font=("Microsoft YaHei UI", 10),
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", ACCENT_SOFT)],
+            foreground=[("selected", TEXT_PRIMARY)],
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=SURFACE_MUTED,
+            foreground=TEXT_PRIMARY,
+            bordercolor=DIVIDER,
+            lightcolor=DIVIDER,
+            darkcolor=DIVIDER,
+            relief=tk.FLAT,
+            padding=(6, 7),
+            font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        style.map(
+            "Treeview.Heading",
+            background=[("active", ACCENT_SOFT)],
+        )
+        style.configure(
+            "TScrollbar",
+            background="#C3D1E4",
+            troughcolor=APP_BACKGROUND,
+            bordercolor=APP_BACKGROUND,
+            lightcolor="#C3D1E4",
+            darkcolor="#C3D1E4",
+            arrowcolor=TEXT_SECONDARY,
+        )
+        style.map("TScrollbar", background=[("active", ACCENT)])
         style.configure(
             "SelectedDay.TButton",
+            background=ACCENT,
+            foreground=SURFACE,
+            bordercolor=ACCENT,
+            lightcolor=ACCENT,
+            darkcolor=ACCENT,
             font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        style.map(
+            "SelectedDay.TButton",
+            background=[("active", ACCENT_HOVER), ("pressed", "#1E40AF")],
+            foreground=[("active", SURFACE)],
         )
 
     def _build_ui(self) -> None:
@@ -703,7 +917,7 @@ class StockPriceApp(tk.Tk):
         self.suggestion_frame = ttk.Frame(outer, padding=(84, 0, 136, 8))
         suggestion_border = tk.Frame(
             self.suggestion_frame,
-            background="#c7cbd1",
+            background=DIVIDER,
             padx=1,
             pady=1,
         )
@@ -715,8 +929,10 @@ class StockPriceApp(tk.Tk):
             borderwidth=0,
             highlightthickness=0,
             font=("Microsoft YaHei UI", 10),
-            selectbackground="#dbeafe",
-            selectforeground="#111827",
+            background=SURFACE,
+            foreground=TEXT_PRIMARY,
+            selectbackground=ACCENT_SOFT,
+            selectforeground=TEXT_PRIMARY,
         )
         suggestion_scroll = ttk.Scrollbar(
             suggestion_border,
@@ -759,9 +975,9 @@ class StockPriceApp(tk.Tk):
                     stretch=column in {"name", "time"},
                 )
 
-            tree.tag_configure("up", foreground="#d93025")
-            tree.tag_configure("down", foreground="#188038")
-            tree.tag_configure("waiting", foreground="#6b7280")
+            tree.tag_configure("up", foreground=BUY_COLOR)
+            tree.tag_configure("down", foreground=SELL_COLOR)
+            tree.tag_configure("waiting", foreground=TEXT_SECONDARY)
             tree.bind("<Button-1>", self._clear_selection_on_blank)
             tree.bind("<ButtonPress-1>", self._begin_market_swipe, add="+")
             tree.bind("<ButtonRelease-1>", self._finish_market_swipe, add="+")
@@ -945,14 +1161,14 @@ class StockPriceApp(tk.Tk):
                         try:
                             datetime.strptime(trade_date, "%Y-%m-%d")
                             price_value = Decimal(price)
-                            quantity_value = Decimal(quantity)
                         except (ValueError, InvalidOperation):
                             continue
                         if (
                             price_value.is_finite()
                             and price_value > 0
-                            and quantity_value.is_finite()
-                            and quantity_value > 0
+                            and quantity.isascii()
+                            and quantity.isdigit()
+                            and int(quantity) > 0
                             and trade_type in {"买入", "卖出"}
                         ):
                             records.append(
