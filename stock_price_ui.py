@@ -72,6 +72,23 @@ SELL_COLOR = "#059669"
 HIGH_RETURN_BACKGROUND = "#FEF3C7"
 HIGH_RETURN_THRESHOLD = Decimal("0.20")
 DIVIDER = "#D7E0EC"
+TRADE_COLUMNS = (
+    "trade_date",
+    "trade_type",
+    "price",
+    "quantity",
+    "profit",
+    "return",
+)
+TRADE_HEADINGS = {
+    "trade_date": "交易日期",
+    "trade_type": "交易类型",
+    "price": "交易价格",
+    "quantity": "交易份额",
+    "profit": "盈亏",
+    "return": "收益率",
+}
+SORTABLE_TRADE_COLUMNS = {"trade_date", "profit", "return"}
 STATE_VERSION = 4
 WINDOW_GEOMETRY_PATTERN = re.compile(
     r"^(?P<width>\d+)x(?P<height>\d+)(?P<x>[+-]\d+)(?P<y>[+-]\d+)$"
@@ -494,6 +511,8 @@ class StockTradeWindow(tk.Toplevel):
         self.owner = owner
         self.symbol = symbol
         self.currency = "USD" if symbol.market == "US" else "HKD"
+        self._sort_column: str | None = None
+        self._sort_descending = False
         self.title(f"交易记录 - {display_name or symbol.canonical}")
         self.geometry("650x430")
         self.minsize(520, 340)
@@ -543,23 +562,23 @@ class StockTradeWindow(tk.Toplevel):
         table_frame.pack(fill=tk.BOTH, expand=True)
         self.trade_tree = ttk.Treeview(
             table_frame,
-            columns=(
-                "trade_date",
-                "trade_type",
-                "price",
-                "quantity",
-                "profit",
-                "return",
-            ),
+            columns=TRADE_COLUMNS,
             show="headings",
             selectmode="browse",
         )
-        self.trade_tree.heading("trade_date", text="交易日期", anchor=tk.CENTER)
-        self.trade_tree.heading("trade_type", text="交易类型", anchor=tk.CENTER)
-        self.trade_tree.heading("price", text="交易价格", anchor=tk.CENTER)
-        self.trade_tree.heading("quantity", text="交易份额", anchor=tk.CENTER)
-        self.trade_tree.heading("profit", text="盈亏", anchor=tk.CENTER)
-        self.trade_tree.heading("return", text="收益率", anchor=tk.CENTER)
+        for column in TRADE_COLUMNS:
+            heading_options: dict[str, object] = {
+                "text": TRADE_HEADINGS[column],
+                "anchor": tk.CENTER,
+            }
+            if column in SORTABLE_TRADE_COLUMNS:
+                heading_options["command"] = (
+                    lambda selected=column: self._sort_records(
+                        selected,
+                        descending=False,
+                    )
+                )
+            self.trade_tree.heading(column, **heading_options)
         self.trade_tree.column("trade_date", width=100, anchor=tk.CENTER)
         self.trade_tree.column("trade_type", width=70, anchor=tk.CENTER)
         self.trade_tree.column("price", width=105, anchor=tk.CENTER)
@@ -658,12 +677,70 @@ class StockTradeWindow(tk.Toplevel):
                 values=values,
                 tags=self._trade_row_tags(record),
             )
+        if self._sort_column is not None:
+            self._sort_records(self._sort_column, self._sort_descending)
 
     def _trade_row_tags(self, record: TradeRecord) -> tuple[str, ...]:
         tags = ["buy" if record.trade_type == "买入" else "sell"]
         if self.owner._trade_return_exceeds_threshold(self.symbol, record):
             tags.append("high_return")
         return tuple(tags)
+
+    def _sort_records(self, column: str, descending: bool) -> None:
+        if column not in SORTABLE_TRADE_COLUMNS:
+            return
+
+        records = self.owner.trades.get(self.symbol.canonical, [])
+        sortable_items: list[tuple[str, str | Decimal]] = []
+        missing_items: list[str] = []
+        for item_id in self.trade_tree.get_children(""):
+            if not item_id.startswith("trade-"):
+                missing_items.append(item_id)
+                continue
+            try:
+                index = int(item_id.removeprefix("trade-"))
+                record = records[index]
+            except (ValueError, IndexError):
+                missing_items.append(item_id)
+                continue
+
+            if column == "trade_date":
+                sortable_items.append((item_id, record.trade_date))
+                continue
+
+            values = self.owner._calculate_trade_performance_values(
+                self.symbol,
+                record,
+            )
+            if values is None:
+                missing_items.append(item_id)
+                continue
+            value = values[0] if column == "profit" else values[1]
+            sortable_items.append((item_id, value))
+
+        sortable_items.sort(key=lambda item: item[1], reverse=descending)
+        ordered_items = [item_id for item_id, _value in sortable_items]
+        ordered_items.extend(missing_items)
+        for position, item_id in enumerate(ordered_items):
+            self.trade_tree.move(item_id, "", position)
+
+        self._sort_column = column
+        self._sort_descending = descending
+        for heading_column in TRADE_COLUMNS:
+            heading = TRADE_HEADINGS[heading_column]
+            if heading_column == column:
+                heading += " ↓" if descending else " ↑"
+            self.trade_tree.heading(heading_column, text=heading)
+
+    def _column_at(self, x: int) -> str | None:
+        column_id = self.trade_tree.identify_column(x)
+        if not column_id.startswith("#"):
+            return None
+        try:
+            index = int(column_id[1:]) - 1
+        except ValueError:
+            return None
+        return TRADE_COLUMNS[index] if 0 <= index < len(TRADE_COLUMNS) else None
 
     @staticmethod
     def _metric_color(value: str) -> str:
@@ -708,6 +785,13 @@ class StockTradeWindow(tk.Toplevel):
         return index if 0 <= index < len(records) else None
 
     def _show_context_menu(self, event: tk.Event) -> str | None:
+        if self.trade_tree.identify_region(event.x, event.y) == "heading":
+            column = self._column_at(event.x)
+            if column in SORTABLE_TRADE_COLUMNS:
+                self._sort_records(column, descending=True)
+                return "break"
+            return None
+
         item_id = self.trade_tree.identify_row(event.y)
         if not item_id:
             return None
