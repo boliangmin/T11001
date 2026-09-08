@@ -208,6 +208,7 @@ class StockPriceApp(tk.Tk):
         self.tree.tag_configure("up", foreground="#d93025")
         self.tree.tag_configure("down", foreground="#188038")
         self.tree.tag_configure("waiting", foreground="#6b7280")
+        self.tree.bind("<Button-1>", self._clear_selection_on_blank)
         self.tree.bind("<Delete>", self.remove_selected)
 
         vertical = ttk.Scrollbar(
@@ -590,6 +591,15 @@ class StockPriceApp(tk.Tk):
             self.code_entry.focus_set()
             return
         self._start_refresh(list(self.symbols.values()))
+
+    def _clear_selection_on_blank(self, event: tk.Event) -> None:
+        row_id = self.tree.identify_row(event.y)
+        region = self.tree.identify_region(event.x, event.y)
+        if not row_id and region not in {"heading", "separator"}:
+            selected_items = self.tree.selection()
+            if selected_items:
+                self.tree.selection_remove(*selected_items)
+            self.tree.focus("")
 
     def remove_selected(self, _event: tk.Event | None = None) -> None:
         if self._refreshing:
