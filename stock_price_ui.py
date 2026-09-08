@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
+import json
+import os
 import queue
+import re
 import threading
 import tkinter as tk
 from datetime import datetime
+from pathlib import Path
 from tkinter import messagebox, ttk
 from tkinter import font as tkfont
 
@@ -16,11 +20,23 @@ from stock_price import (
     StockSymbol,
     choose_freshest,
     fetch_quotes,
+    normalize_symbol,
     search_stocks,
 )
 
 
 PROVIDER_NAMES = ["yahoo", "tencent", "sina"]
+STATE_VERSION = 1
+WINDOW_GEOMETRY_PATTERN = re.compile(
+    r"^(?P<width>\d+)x(?P<height>\d+)(?P<x>[+-]\d+)(?P<y>[+-]\d+)$"
+)
+
+
+def _default_state_path() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data) / "StockPriceViewer" / "state.json"
+    return Path.home() / ".stock_price_viewer" / "state.json"
 
 
 def _contains_chinese(value: str) -> bool:
@@ -28,16 +44,20 @@ def _contains_chinese(value: str) -> bool:
 
 
 class StockPriceApp(tk.Tk):
-    def __init__(self) -> None:
+    def __init__(self, state_path: Path | None = None) -> None:
         super().__init__()
         self.title("美股 / 港股行情")
         self.geometry("1050x600")
         self.minsize(820, 430)
 
+        self._state_path = state_path or _default_state_path()
         self.symbols: dict[str, StockSymbol] = {}
         self.display_names: dict[str, str] = {}
         self._result_queue: queue.Queue[tuple] = queue.Queue()
         self._refreshing = False
+        self._queue_after_id: str | None = None
+        self._layout_after_id: str | None = None
+        self._startup_refresh_after_id: str | None = None
         self._search_after_id: str | None = None
         self._search_generation = 0
         self._suggestions: list[StockSearchResult] = []
@@ -46,7 +66,9 @@ class StockPriceApp(tk.Tk):
 
         self._configure_style()
         self._build_ui()
-        self.after(100, self._process_result_queue)
+        self._restore_state()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._queue_after_id = self.after(100, self._process_result_queue)
 
     def _configure_style(self) -> None:
         default_font = tkfont.nametofont("TkDefaultFont")
@@ -220,6 +242,156 @@ class StockPriceApp(tk.Tk):
         self.progress = ttk.Progressbar(outer, mode="indeterminate", length=160)
         self.code_entry.focus_set()
 
+    def _restore_geometry(self, geometry: object) -> bool:
+        match = WINDOW_GEOMETRY_PATTERN.fullmatch(str(geometry))
+        if match is None:
+            return False
+
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        width = max(820, min(int(match.group("width")), screen_width))
+        height = max(430, min(int(match.group("height")), screen_height))
+        x = max(0, min(int(match.group("x")), max(0, screen_width - width)))
+        y = max(0, min(int(match.group("y")), max(0, screen_height - height)))
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        return True
+
+    def _apply_column_widths(self, widths: dict[str, int]) -> None:
+        self._layout_after_id = None
+        for column, width in widths.items():
+            if column in self.tree["columns"]:
+                self.tree.column(column, width=width)
+
+    def _refresh_restored_stocks(self, symbols: list[StockSymbol]) -> None:
+        self._startup_refresh_after_id = None
+        self._start_refresh(symbols)
+
+    def _restore_state(self) -> None:
+        if not self._state_path.is_file():
+            return
+
+        try:
+            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or payload.get("version") != STATE_VERSION:
+                raise ValueError("保存文件版本不受支持")
+
+            layout_restored = self._restore_geometry(payload.get("window_geometry"))
+            saved_columns = payload.get("column_widths")
+            if isinstance(saved_columns, dict):
+                valid_widths: dict[str, int] = {}
+                for column in self.tree["columns"]:
+                    width = saved_columns.get(column)
+                    if isinstance(width, int) and 70 <= width <= 2000:
+                        valid_widths[column] = width
+                        layout_restored = True
+                if valid_widths:
+                    self._layout_after_id = self.after_idle(
+                        lambda widths=valid_widths: self._apply_column_widths(widths)
+                    )
+
+            restored_count = 0
+            saved_stocks = payload.get("stocks")
+            if isinstance(saved_stocks, list):
+                for item in saved_stocks:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        symbol = normalize_symbol(str(item.get("symbol") or ""))
+                    except ValueError:
+                        continue
+                    if symbol.canonical in self.symbols:
+                        continue
+
+                    display_name = str(item.get("display_name") or "").strip()
+
+                    self.symbols[symbol.canonical] = symbol
+                    self.display_names[symbol.canonical] = display_name
+                    self.tree.insert(
+                        "",
+                        tk.END,
+                        iid=symbol.canonical,
+                        values=(
+                            symbol.canonical,
+                            display_name or "--",
+                            "--",
+                            "--",
+                            "等待刷新",
+                        ),
+                        tags=("waiting",),
+                    )
+                    restored_count += 1
+
+            if restored_count:
+                self.status_var.set(
+                    f"已恢复 {restored_count} 只股票，正在刷新最新行情……"
+                )
+                restored_symbols = list(self.symbols.values())
+                self._startup_refresh_after_id = self.after(
+                    200,
+                    lambda: self._refresh_restored_stocks(restored_symbols),
+                )
+            elif layout_restored:
+                self.status_var.set("已恢复上次界面布局。")
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            self.status_var.set(f"未能恢复上次保存内容：{exc}")
+
+    def _save_state(self) -> bool:
+        payload = {
+            "version": STATE_VERSION,
+            "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "window_geometry": self.geometry(),
+            "column_widths": {
+                column: int(self.tree.column(column, "width"))
+                for column in self.tree["columns"]
+            },
+            "stocks": [],
+        }
+        for item_id in self.tree.get_children(""):
+            if item_id not in self.symbols:
+                continue
+            payload["stocks"].append(
+                {
+                    "symbol": item_id,
+                    "display_name": self.display_names.get(item_id, ""),
+                }
+            )
+
+        temporary_path = self._state_path.with_name(
+            f"{self._state_path.name}.{os.getpid()}.tmp"
+        )
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            temporary_path.replace(self._state_path)
+            return True
+        except (OSError, TypeError) as exc:
+            self.status_var.set(f"保存失败：{exc}")
+            return False
+        finally:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _on_close(self) -> None:
+        if self._search_after_id is not None:
+            self.after_cancel(self._search_after_id)
+            self._search_after_id = None
+        if self._queue_after_id is not None:
+            self.after_cancel(self._queue_after_id)
+            self._queue_after_id = None
+        if self._layout_after_id is not None:
+            self.after_cancel(self._layout_after_id)
+            self._layout_after_id = None
+        if self._startup_refresh_after_id is not None:
+            self.after_cancel(self._startup_refresh_after_id)
+            self._startup_refresh_after_id = None
+        self._save_state()
+        self.destroy()
+
     def _on_query_changed(self, *_args: object) -> None:
         if self._setting_selection:
             return
@@ -388,6 +560,7 @@ class StockPriceApp(tk.Tk):
                 or not _contains_chinese(self.display_names.get(symbol.canonical, ""))
             ):
                 self.display_names[symbol.canonical] = selected_name
+                self._save_state()
             self.tree.selection_set(symbol.canonical)
             self.tree.see(symbol.canonical)
             self.status_var.set(f"{symbol.canonical} 已在列表中，正在重新获取行情。")
@@ -406,6 +579,7 @@ class StockPriceApp(tk.Tk):
         )
         self.tree.selection_set(symbol.canonical)
         self.tree.see(symbol.canonical)
+        self._save_state()
         self._clear_search()
         self.code_entry.focus_set()
         self._start_refresh([symbol])
@@ -425,6 +599,7 @@ class StockPriceApp(tk.Tk):
             self.tree.delete(item_id)
             self.symbols.pop(item_id, None)
             self.display_names.pop(item_id, None)
+        self._save_state()
         self.status_var.set(f"列表中共有 {len(self.symbols)} 只股票。")
 
     def _start_refresh(self, symbols: list[StockSymbol]) -> None:
@@ -438,12 +613,6 @@ class StockPriceApp(tk.Tk):
         self.progress.pack(fill=tk.X, pady=(8, 0))
         self.progress.start(12)
         self.status_var.set(f"正在刷新 {len(symbols)} 只股票……")
-
-        for symbol in symbols:
-            if self.tree.exists(symbol.canonical):
-                current = list(self.tree.item(symbol.canonical, "values"))
-                current[-1] = "刷新中……"
-                self.tree.item(symbol.canonical, values=current, tags=("waiting",))
 
         worker = threading.Thread(
             target=self._refresh_worker,
@@ -495,7 +664,7 @@ class StockPriceApp(tk.Tk):
         except queue.Empty:
             pass
         finally:
-            self.after(100, self._process_result_queue)
+            self._queue_after_id = self.after(100, self._process_result_queue)
 
     def _update_row(
         self,
@@ -547,13 +716,16 @@ class StockPriceApp(tk.Tk):
             ),
             tags=(tag,) if tag else (),
         )
+        self._save_state()
 
     def _show_row_error(self, symbol: StockSymbol, error: str) -> None:
         if not self.tree.exists(symbol.canonical):
             return
         current = list(self.tree.item(symbol.canonical, "values"))
-        current[-1] = "获取失败"
-        self.tree.item(symbol.canonical, values=current, tags=("waiting",))
+        if len(current) == 5 and current[2] == "--":
+            current[-1] = "获取失败"
+            self.tree.item(symbol.canonical, values=current, tags=("waiting",))
+        self._save_state()
         self.status_var.set(f"{symbol.canonical} 行情获取失败：{error[:100]}")
 
     def _finish_refresh(self, count: int, finished_at: datetime) -> None:
@@ -567,6 +739,7 @@ class StockPriceApp(tk.Tk):
         self.status_var.set(
             f"已刷新 {count} 只股票 · {finished_at.strftime('%Y-%m-%d %H:%M:%S')}"
         )
+        self._save_state()
         self.code_entry.focus_set()
 
 
