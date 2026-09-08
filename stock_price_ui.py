@@ -12,10 +12,11 @@ from tkinter import font as tkfont
 
 from stock_price import (
     PriceQuote,
+    StockSearchResult,
     StockSymbol,
     choose_freshest,
     fetch_quotes,
-    normalize_symbol,
+    search_stocks,
 )
 
 
@@ -32,6 +33,11 @@ class StockPriceApp(tk.Tk):
         self.symbols: dict[str, StockSymbol] = {}
         self._result_queue: queue.Queue[tuple] = queue.Queue()
         self._refreshing = False
+        self._search_after_id: str | None = None
+        self._search_generation = 0
+        self._suggestions: list[StockSearchResult] = []
+        self._selected_result: StockSearchResult | None = None
+        self._setting_selection = False
 
         self._configure_style()
         self._build_ui()
@@ -67,14 +73,14 @@ class StockPriceApp(tk.Tk):
         ttk.Label(outer, text="股票行情", style="Title.TLabel").pack(anchor=tk.W)
         ttk.Label(
             outer,
-            text="支持美股代码（AAPL）和港股代码（00700）；数据来自 Yahoo、腾讯和新浪。",
+            text="输入股票名称或代码，从搜索候选中选择后添加；数据来自 Yahoo、腾讯和新浪。",
             style="Hint.TLabel",
         ).pack(anchor=tk.W, pady=(3, 16))
 
         input_frame = ttk.Frame(outer)
-        input_frame.pack(fill=tk.X, pady=(0, 14))
+        input_frame.pack(fill=tk.X, pady=(0, 8))
 
-        ttk.Label(input_frame, text="股票代码").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(input_frame, text="搜索股票").pack(side=tk.LEFT, padx=(0, 8))
         self.code_var = tk.StringVar()
         self.code_entry = ttk.Entry(
             input_frame,
@@ -83,13 +89,16 @@ class StockPriceApp(tk.Tk):
             font=("Consolas", 11),
         )
         self.code_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.code_entry.bind("<Return>", lambda _event: self.add_stock())
+        self.code_entry.bind("<Return>", self._on_entry_return)
+        self.code_entry.bind("<Down>", self._focus_suggestions)
+        self.code_var.trace_add("write", self._on_query_changed)
 
         self.add_button = ttk.Button(
             input_frame,
             text="添加",
             command=self.add_stock,
             style="Primary.TButton",
+            state=tk.DISABLED,
         )
         self.add_button.pack(side=tk.LEFT, padx=(10, 8))
 
@@ -101,8 +110,38 @@ class StockPriceApp(tk.Tk):
         )
         self.refresh_button.pack(side=tk.LEFT)
 
-        table_frame = ttk.Frame(outer)
-        table_frame.pack(fill=tk.BOTH, expand=True)
+        self.suggestion_frame = ttk.Frame(outer, padding=(84, 0, 136, 8))
+        suggestion_border = tk.Frame(
+            self.suggestion_frame,
+            background="#c7cbd1",
+            padx=1,
+            pady=1,
+        )
+        suggestion_border.pack(fill=tk.X)
+        self.suggestion_list = tk.Listbox(
+            suggestion_border,
+            height=5,
+            activestyle="none",
+            borderwidth=0,
+            highlightthickness=0,
+            font=("Microsoft YaHei UI", 10),
+            selectbackground="#dbeafe",
+            selectforeground="#111827",
+        )
+        suggestion_scroll = ttk.Scrollbar(
+            suggestion_border,
+            orient=tk.VERTICAL,
+            command=self.suggestion_list.yview,
+        )
+        self.suggestion_list.configure(yscrollcommand=suggestion_scroll.set)
+        self.suggestion_list.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        suggestion_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.suggestion_list.bind("<ButtonRelease-1>", self._click_suggestion)
+        self.suggestion_list.bind("<Return>", self._choose_suggestion)
+        self.suggestion_list.bind("<Escape>", lambda _event: self._hide_suggestions())
+
+        self.table_frame = ttk.Frame(outer)
+        self.table_frame.pack(fill=tk.BOTH, expand=True)
 
         columns = (
             "code",
@@ -114,7 +153,7 @@ class StockPriceApp(tk.Tk):
             "status",
         )
         self.tree = ttk.Treeview(
-            table_frame,
+            self.table_frame,
             columns=columns,
             show="headings",
             selectmode="extended",
@@ -153,9 +192,11 @@ class StockPriceApp(tk.Tk):
         self.tree.tag_configure("waiting", foreground="#6b7280")
         self.tree.bind("<Delete>", self.remove_selected)
 
-        vertical = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        vertical = ttk.Scrollbar(
+            self.table_frame, orient=tk.VERTICAL, command=self.tree.yview
+        )
         horizontal = ttk.Scrollbar(
-            table_frame, orient=tk.HORIZONTAL, command=self.tree.xview
+            self.table_frame, orient=tk.HORIZONTAL, command=self.tree.xview
         )
         self.tree.configure(
             yscrollcommand=vertical.set,
@@ -165,12 +206,12 @@ class StockPriceApp(tk.Tk):
         self.tree.grid(row=0, column=0, sticky="nsew")
         vertical.grid(row=0, column=1, sticky="ns")
         horizontal.grid(row=1, column=0, sticky="ew")
-        table_frame.rowconfigure(0, weight=1)
-        table_frame.columnconfigure(0, weight=1)
+        self.table_frame.rowconfigure(0, weight=1)
+        self.table_frame.columnconfigure(0, weight=1)
 
         footer = ttk.Frame(outer)
         footer.pack(fill=tk.X, pady=(10, 0))
-        self.status_var = tk.StringVar(value="请输入股票代码，然后点击“添加”。")
+        self.status_var = tk.StringVar(value="请输入股票名称或代码，并从候选项中选择。")
         ttk.Label(footer, textvariable=self.status_var, style="Hint.TLabel").pack(
             side=tk.LEFT, fill=tk.X, expand=True
         )
@@ -183,26 +224,172 @@ class StockPriceApp(tk.Tk):
         self.progress = ttk.Progressbar(outer, mode="indeterminate", length=160)
         self.code_entry.focus_set()
 
-    def add_stock(self) -> None:
-        raw = self.code_var.get().strip()
-        if not raw:
-            messagebox.showinfo("请输入代码", "请输入美股或港股代码。", parent=self)
-            self.code_entry.focus_set()
+    def _on_query_changed(self, *_args: object) -> None:
+        if self._setting_selection:
+            return
+        self._selected_result = None
+        self.add_button.configure(state=tk.DISABLED)
+        self._search_generation += 1
+        generation = self._search_generation
+        if self._search_after_id is not None:
+            self.after_cancel(self._search_after_id)
+            self._search_after_id = None
+
+        query = self.code_var.get().strip()
+        if not query:
+            self._suggestions = []
+            self._hide_suggestions()
+            self.status_var.set("请输入股票名称或代码，并从候选项中选择。")
             return
 
+        self.status_var.set(f"准备搜索“{query}”……")
+        self._search_after_id = self.after(
+            350,
+            lambda: self._start_search(query, generation),
+        )
+
+    def _start_search(self, query: str, generation: int) -> None:
+        self._search_after_id = None
+        if generation != self._search_generation:
+            return
+        self.status_var.set(f"正在搜索“{query}”……")
+        worker = threading.Thread(
+            target=self._search_worker,
+            args=(query, generation),
+            daemon=True,
+        )
+        worker.start()
+
+    def _search_worker(self, query: str, generation: int) -> None:
         try:
-            symbol = normalize_symbol(raw)
-        except ValueError as exc:
-            messagebox.showerror("代码无效", str(exc), parent=self)
-            self.code_entry.select_range(0, tk.END)
+            results, errors = search_stocks(query, timeout=8.0, limit=10)
+            self._result_queue.put(("search", generation, query, results, errors))
+        except Exception as exc:
+            self._result_queue.put(("search_error", generation, query, str(exc)))
+
+    def _show_search_results(
+        self,
+        generation: int,
+        query: str,
+        results: list[StockSearchResult],
+        errors: dict[str, str],
+    ) -> None:
+        if generation != self._search_generation or query != self.code_var.get().strip():
+            return
+
+        self._suggestions = results
+        self.suggestion_list.delete(0, tk.END)
+        if results:
+            for result in results:
+                market_name = "港股" if result.symbol.market == "HK" else "美股"
+                self.suggestion_list.insert(
+                    tk.END,
+                    f"{result.display_code:<12}  {result.name}    {market_name} · {result.source}",
+                )
+            self.suggestion_list.configure(height=min(6, len(results)))
+            failed = f"，{len(errors)} 个来源不可用" if errors else ""
+            self.status_var.set(
+                f"找到 {len(results)} 个候选{failed}；点击候选项完成选择。"
+            )
+        else:
+            self.suggestion_list.insert(tk.END, "未找到匹配的美股或港股")
+            self.suggestion_list.configure(height=1)
+            self.status_var.set("未找到匹配股票，请尝试名称、拼音或完整股票代码。")
+
+        if not self.suggestion_frame.winfo_manager():
+            self.suggestion_frame.pack(
+                fill=tk.X,
+                before=self.table_frame,
+            )
+
+    def _hide_suggestions(self) -> None:
+        if self.suggestion_frame.winfo_manager():
+            self.suggestion_frame.pack_forget()
+        self.code_entry.focus_set()
+
+    def _focus_suggestions(self, _event: tk.Event) -> str:
+        if self._suggestions:
+            self.suggestion_list.focus_set()
+            self.suggestion_list.selection_clear(0, tk.END)
+            self.suggestion_list.selection_set(0)
+            self.suggestion_list.activate(0)
+        return "break"
+
+    def _on_entry_return(self, _event: tk.Event) -> str:
+        if self._suggestions and self.suggestion_frame.winfo_manager():
+            self.suggestion_list.selection_clear(0, tk.END)
+            self.suggestion_list.selection_set(0)
+            self._choose_suggestion()
+        return "break"
+
+    def _click_suggestion(self, event: tk.Event) -> None:
+        if not self._suggestions:
+            return
+        index = self.suggestion_list.nearest(event.y)
+        self.suggestion_list.selection_clear(0, tk.END)
+        self.suggestion_list.selection_set(index)
+        self._choose_suggestion()
+
+    def _choose_suggestion(self, _event: tk.Event | None = None) -> str:
+        selection = self.suggestion_list.curselection()
+        if not selection or not self._suggestions:
+            return "break"
+        index = selection[0]
+        if index >= len(self._suggestions):
+            return "break"
+
+        result = self._suggestions[index]
+        self._selected_result = result
+        self._setting_selection = True
+        try:
+            self.code_var.set(result.display_code)
+        finally:
+            self._setting_selection = False
+        self._hide_suggestions()
+        if not self._refreshing:
+            self.add_button.configure(state=tk.NORMAL)
+        market_name = "港股" if result.symbol.market == "HK" else "美股"
+        self.status_var.set(
+            f"已选择：{result.name}（{result.display_code}，{market_name}），点击“添加”加入列表。"
+        )
+        return "break"
+
+    def _clear_search(self) -> None:
+        self._search_generation += 1
+        if self._search_after_id is not None:
+            self.after_cancel(self._search_after_id)
+            self._search_after_id = None
+        self._selected_result = None
+        self._suggestions = []
+        self._setting_selection = True
+        try:
+            self.code_var.set("")
+        finally:
+            self._setting_selection = False
+        self.add_button.configure(state=tk.DISABLED)
+        self._hide_suggestions()
+
+    def add_stock(self) -> None:
+        selected = self._selected_result
+        if selected is None:
+            messagebox.showinfo(
+                "请先选择股票",
+                "请先输入名称或代码，并点击搜索候选项完成选择。",
+                parent=self,
+            )
             self.code_entry.focus_set()
             return
+        if self._refreshing:
+            self.status_var.set("行情刷新中，请稍后再添加股票。")
+            return
+
+        symbol = selected.symbol
 
         if symbol.canonical in self.symbols:
             self.tree.selection_set(symbol.canonical)
             self.tree.see(symbol.canonical)
             self.status_var.set(f"{symbol.canonical} 已在列表中，正在重新获取行情。")
-            self.code_var.set("")
+            self._clear_search()
             self._start_refresh([symbol])
             return
 
@@ -216,7 +403,7 @@ class StockPriceApp(tk.Tk):
         )
         self.tree.selection_set(symbol.canonical)
         self.tree.see(symbol.canonical)
-        self.code_var.set("")
+        self._clear_search()
         self.code_entry.focus_set()
         self._start_refresh([symbol])
 
@@ -281,6 +468,23 @@ class StockPriceApp(tk.Tk):
                 elif kind == "error":
                     _, symbol, error = message
                     self._show_row_error(symbol, error)
+                elif kind == "search":
+                    _, generation, query, results, errors = message
+                    self._show_search_results(
+                        generation,
+                        query,
+                        results,
+                        errors,
+                    )
+                elif kind == "search_error":
+                    _, generation, query, error = message
+                    if (
+                        generation == self._search_generation
+                        and query == self.code_var.get().strip()
+                    ):
+                        self._suggestions = []
+                        self._hide_suggestions()
+                        self.status_var.set(f"搜索失败：{error}")
                 elif kind == "done":
                     _, count, finished_at = message
                     self._finish_refresh(count, finished_at)
@@ -342,7 +546,9 @@ class StockPriceApp(tk.Tk):
         self._refreshing = False
         self.progress.stop()
         self.progress.pack_forget()
-        self.add_button.configure(state=tk.NORMAL)
+        self.add_button.configure(
+            state=tk.NORMAL if self._selected_result is not None else tk.DISABLED
+        )
         self.refresh_button.configure(state=tk.NORMAL)
         self.status_var.set(
             f"已刷新 {count} 只股票 · {finished_at.strftime('%Y-%m-%d %H:%M:%S')}"

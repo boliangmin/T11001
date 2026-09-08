@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote as url_quote
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
@@ -77,6 +78,20 @@ class PriceQuote:
         result = asdict(self)
         result.pop("_sort_time", None)
         return result
+
+
+@dataclass
+class StockSearchResult:
+    symbol: StockSymbol
+    name: str
+    source: str
+    provider_rank: int = 0
+
+    @property
+    def display_code(self) -> str:
+        if self.symbol.market == "HK":
+            return self.symbol.yahoo
+        return self.symbol.canonical.removeprefix("US.")
 
 
 def normalize_symbol(raw: str) -> StockSymbol:
@@ -463,6 +478,270 @@ def fetch_sina(symbol: StockSymbol, timeout: float) -> PriceQuote:
         fetched_at_utc=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         _sort_time=sort_time,
     )
+
+
+def _search_symbol(market: str, code: str) -> StockSymbol | None:
+    code = code.strip().upper()
+    try:
+        if market == "HK":
+            return normalize_symbol(f"HK.{code}")
+        if market == "US":
+            # 腾讯会在美股代码后附交易所标识，例如 AAPL.OQ、BABA.N。
+            code = re.sub(r"\.(?:OQ|N|A|P|PS|PK)$", "", code)
+            return normalize_symbol(f"US.{code}")
+    except ValueError:
+        return None
+    return None
+
+
+def _search_term(query: str, provider: str) -> str:
+    value = query.strip()
+    upper = value.upper()
+    explicit_hk = upper.startswith("HK.") or upper.endswith(".HK")
+    complete_numeric_hk = value.isdigit() and len(value) in {4, 5}
+    if explicit_hk or complete_numeric_hk:
+        try:
+            symbol = normalize_symbol(value)
+        except ValueError:
+            return value
+        if provider == "yahoo":
+            return symbol.yahoo
+        return symbol.canonical.removeprefix("HK.")
+    if upper.startswith("US."):
+        return value[3:]
+    if upper.endswith(".US"):
+        return value[:-3]
+    return value
+
+
+def search_yahoo(query: str, timeout: float) -> list[StockSearchResult]:
+    params = urlencode(
+        {
+            "q": _search_term(query, "yahoo"),
+            "quotesCount": 12,
+            "newsCount": 0,
+            "enableFuzzyQuery": "true",
+        }
+    )
+    raw = _fetch_bytes(
+        f"https://query1.finance.yahoo.com/v1/finance/search?{params}",
+        timeout,
+        attempts=1,
+    )
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise QuoteError(f"Yahoo 搜索数据格式异常：{exc}") from exc
+
+    supported_us_exchanges = {
+        "NMS",
+        "NYQ",
+        "NGM",
+        "NCM",
+        "ASE",
+        "PCX",
+        "BTS",
+        "PNK",
+        "OEM",
+        "OQX",
+        "OQB",
+        "NASDAQ",
+        "NYSE",
+        "AMEX",
+    }
+    results: list[StockSearchResult] = []
+    for rank, item in enumerate(payload.get("quotes") or []):
+        if not isinstance(item, dict) or item.get("quoteType") != "EQUITY":
+            continue
+        code = str(item.get("symbol") or "").strip().upper()
+        exchange = str(item.get("exchange") or "").strip().upper()
+        if code.endswith(".HK") or exchange == "HKG":
+            symbol = _search_symbol("HK", code.removesuffix(".HK"))
+        elif exchange in supported_us_exchanges:
+            symbol = _search_symbol("US", code)
+        else:
+            continue
+        if symbol is None:
+            continue
+        name = str(item.get("longname") or item.get("shortname") or code).strip()
+        results.append(
+            StockSearchResult(
+                symbol=symbol,
+                name=name,
+                source="Yahoo",
+                provider_rank=rank,
+            )
+        )
+    return results
+
+
+def _decode_tencent_escapes(value: str) -> str:
+    return re.sub(
+        r"\\u([0-9a-fA-F]{4})",
+        lambda match: chr(int(match.group(1), 16)),
+        value,
+    )
+
+
+def search_tencent(query: str, timeout: float) -> list[StockSearchResult]:
+    encoded = url_quote(_search_term(query, "tencent"), safe="")
+    raw = _fetch_bytes(
+        f"https://smartbox.gtimg.cn/s3/?q={encoded}&t=all",
+        timeout,
+        referer="https://gu.qq.com/",
+        attempts=1,
+    )
+    text = _decode_cn_market_data(raw)
+    # 腾讯搜索响应有时以引号结束、有时追加分号，不能强制要求分号。
+    match = re.search(r'v_hint="([^"]*)"', text, re.S)
+    if not match or match.group(1) == "N":
+        return []
+
+    results: list[StockSearchResult] = []
+    body = _decode_tencent_escapes(match.group(1))
+    for rank, record in enumerate(body.split("^")):
+        fields = record.split("~")
+        if len(fields) < 5 or fields[4].strip().upper() != "GP":
+            continue
+        market = fields[0].strip().upper()
+        if market not in {"HK", "US"}:
+            continue
+        symbol = _search_symbol(market, fields[1])
+        if symbol is None:
+            continue
+        results.append(
+            StockSearchResult(
+                symbol=symbol,
+                name=fields[2].strip() or symbol.canonical,
+                source="腾讯",
+                provider_rank=rank,
+            )
+        )
+    return results
+
+
+def search_sina(query: str, timeout: float) -> list[StockSearchResult]:
+    encoded = url_quote(_search_term(query, "sina"), safe="")
+    raw = _fetch_bytes(
+        f"https://suggest3.sinajs.cn/suggest/type=&key={encoded}",
+        timeout,
+        referer="https://finance.sina.com.cn/",
+        attempts=1,
+    )
+    text = _decode_cn_market_data(raw)
+    match = re.search(r'var\s+suggestvalue="(.*?)";', text, re.S)
+    if not match or not match.group(1):
+        return []
+
+    results: list[StockSearchResult] = []
+    for rank, record in enumerate(match.group(1).split(";")):
+        fields = record.split(",")
+        if len(fields) < 7:
+            continue
+        type_code = fields[1].strip()
+        market = "HK" if type_code == "31" else "US" if type_code == "41" else ""
+        if not market:
+            continue
+        symbol = _search_symbol(market, fields[2])
+        if symbol is None:
+            continue
+        name = fields[4].strip() or fields[6].strip() or fields[0].strip()
+        results.append(
+            StockSearchResult(
+                symbol=symbol,
+                name=name,
+                source="新浪",
+                provider_rank=rank,
+            )
+        )
+    return results
+
+
+SEARCH_PROVIDERS: dict[
+    str, Callable[[str, float], list[StockSearchResult]]
+] = {
+    "tencent": search_tencent,
+    "sina": search_sina,
+    "yahoo": search_yahoo,
+}
+
+
+def _contains_chinese(value: str) -> bool:
+    return bool(re.search(r"[\u3400-\u9fff]", value))
+
+
+def _search_score(result: StockSearchResult, query: str) -> tuple[int, int, str]:
+    term = query.strip().casefold()
+    compact_term = re.sub(r"^(?:hk\.|us\.)|(?:\.hk|\.us)$", "", term)
+    codes = {
+        result.display_code.casefold(),
+        result.symbol.canonical.casefold(),
+        result.symbol.yahoo.casefold(),
+    }
+    compact_codes = {
+        re.sub(r"^(?:hk\.|us\.)|(?:\.hk|\.us)$", "", code) for code in codes
+    }
+    name = result.name.casefold()
+    if term in codes or compact_term in compact_codes:
+        category = 0
+    elif any(code.startswith(term) for code in codes) or any(
+        code.startswith(compact_term) for code in compact_codes
+    ):
+        category = 1
+    elif name == term:
+        category = 2
+    elif term and term in name:
+        category = 3
+    else:
+        category = 4
+    return category, result.provider_rank, result.display_code
+
+
+def search_stocks(
+    query: str,
+    timeout: float = 8.0,
+    limit: int = 10,
+) -> tuple[list[StockSearchResult], dict[str, str]]:
+    """合并三家公开搜索结果，仅保留美股和港股候选。"""
+    query = query.strip()
+    if not query:
+        return [], {}
+
+    provider_results: dict[str, list[StockSearchResult]] = {}
+    errors: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=len(SEARCH_PROVIDERS)) as executor:
+        future_map = {
+            executor.submit(provider, query, timeout): name
+            for name, provider in SEARCH_PROVIDERS.items()
+        }
+        for future in as_completed(future_map):
+            name = future_map[future]
+            try:
+                provider_results[name] = future.result()
+            except Exception as exc:
+                errors[name] = str(exc)
+
+    merged: dict[str, StockSearchResult] = {}
+    # 中文名称优先采用腾讯、其次新浪；Yahoo 用于补充代码和英文名称搜索。
+    for provider_name in ("tencent", "sina", "yahoo"):
+        for result in provider_results.get(provider_name, []):
+            key = result.symbol.canonical
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = result
+                continue
+            sources = existing.source.split("/")
+            if result.source not in sources:
+                existing.source += f"/{result.source}"
+            if _contains_chinese(result.name) and (
+                not _contains_chinese(existing.name)
+                or len(result.name) > len(existing.name)
+            ):
+                existing.name = result.name
+            existing.provider_rank = min(existing.provider_rank, result.provider_rank)
+
+    results = sorted(merged.values(), key=lambda item: _search_score(item, query))
+    return results[: max(1, limit)], errors
 
 
 PROVIDERS: dict[str, Callable[[StockSymbol, float], PriceQuote]] = {
