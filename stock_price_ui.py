@@ -23,6 +23,10 @@ from stock_price import (
 PROVIDER_NAMES = ["yahoo", "tencent", "sina"]
 
 
+def _contains_chinese(value: str) -> bool:
+    return any("\u3400" <= character <= "\u9fff" for character in value)
+
+
 class StockPriceApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -31,6 +35,7 @@ class StockPriceApp(tk.Tk):
         self.minsize(820, 430)
 
         self.symbols: dict[str, StockSymbol] = {}
+        self.display_names: dict[str, str] = {}
         self._result_queue: queue.Queue[tuple] = queue.Queue()
         self._refreshing = False
         self._search_after_id: str | None = None
@@ -70,12 +75,10 @@ class StockPriceApp(tk.Tk):
         outer = ttk.Frame(self, padding=(22, 18, 22, 14))
         outer.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(outer, text="股票行情", style="Title.TLabel").pack(anchor=tk.W)
-        ttk.Label(
-            outer,
-            text="输入股票名称或代码，从搜索候选中选择后添加；数据来自 Yahoo、腾讯和新浪。",
-            style="Hint.TLabel",
-        ).pack(anchor=tk.W, pady=(3, 16))
+        ttk.Label(outer, text="股票行情", style="Title.TLabel").pack(
+            anchor=tk.W,
+            pady=(0, 16),
+        )
 
         input_frame = ttk.Frame(outer)
         input_frame.pack(fill=tk.X, pady=(0, 8))
@@ -149,8 +152,6 @@ class StockPriceApp(tk.Tk):
             "price",
             "change",
             "time",
-            "source",
-            "status",
         )
         self.tree = ttk.Treeview(
             self.table_frame,
@@ -160,21 +161,17 @@ class StockPriceApp(tk.Tk):
         )
         headings = {
             "code": "股票代码",
-            "name": "名称",
+            "name": "中文名称",
             "price": "最新价格",
             "change": "涨跌幅",
             "time": "行情时间",
-            "source": "采用来源",
-            "status": "状态",
         }
         widths = {
             "code": 105,
             "name": 155,
             "price": 120,
             "change": 90,
-            "time": 170,
-            "source": 115,
-            "status": 170,
+            "time": 220,
         }
         for column in columns:
             anchor = tk.E if column in {"price", "change"} else tk.W
@@ -184,7 +181,7 @@ class StockPriceApp(tk.Tk):
                 width=widths[column],
                 minwidth=70,
                 anchor=anchor,
-                stretch=column in {"name", "status"},
+                stretch=column in {"name", "time"},
             )
 
         self.tree.tag_configure("up", foreground="#d93025")
@@ -217,7 +214,7 @@ class StockPriceApp(tk.Tk):
         )
         ttk.Label(
             footer,
-            text="选中行后按 Delete 可移除",
+            text="公开行情可能延迟｜选中行后按 Delete 可移除",
             style="Hint.TLabel",
         ).pack(side=tk.RIGHT)
 
@@ -384,8 +381,14 @@ class StockPriceApp(tk.Tk):
             return
 
         symbol = selected.symbol
+        selected_name = selected.name.strip()
 
         if symbol.canonical in self.symbols:
+            if selected_name and (
+                _contains_chinese(selected_name)
+                or not _contains_chinese(self.display_names.get(symbol.canonical, ""))
+            ):
+                self.display_names[symbol.canonical] = selected_name
             self.tree.selection_set(symbol.canonical)
             self.tree.see(symbol.canonical)
             self.status_var.set(f"{symbol.canonical} 已在列表中，正在重新获取行情。")
@@ -394,11 +397,12 @@ class StockPriceApp(tk.Tk):
             return
 
         self.symbols[symbol.canonical] = symbol
+        self.display_names[symbol.canonical] = selected_name
         self.tree.insert(
             "",
             tk.END,
             iid=symbol.canonical,
-            values=(symbol.canonical, "--", "--", "--", "--", "--", "等待刷新"),
+            values=(symbol.canonical, selected_name or "--", "--", "--", "等待刷新"),
             tags=("waiting",),
         )
         self.tree.selection_set(symbol.canonical)
@@ -421,6 +425,7 @@ class StockPriceApp(tk.Tk):
         for item_id in self.tree.selection():
             self.tree.delete(item_id)
             self.symbols.pop(item_id, None)
+            self.display_names.pop(item_id, None)
         self.status_var.set(f"列表中共有 {len(self.symbols)} 只股票。")
 
     def _start_refresh(self, symbols: list[StockSymbol]) -> None:
@@ -507,15 +512,26 @@ class StockPriceApp(tk.Tk):
             return
 
         best = choose_freshest(quotes)
+        display_name = self.display_names.get(symbol.canonical, "").strip()
+        if not _contains_chinese(display_name):
+            chinese_name = next(
+                (
+                    item.name.strip()
+                    for item in quotes
+                    if item.name.strip() and _contains_chinese(item.name)
+                ),
+                "",
+            )
+            if chinese_name:
+                display_name = chinese_name
+                self.display_names[symbol.canonical] = chinese_name
+        if not display_name:
+            display_name = best.name or "--"
         percentage = (
             "--" if best.change_percent is None else f"{best.change_percent:+.2f}%"
         )
         price = f"{best.price:,.3f} {best.currency}"
         quote_time = best.quote_time or "未提供"
-        failed_count = len(errors)
-        status = f"{len(quotes)}/3 来源有效"
-        if failed_count:
-            status += f"，{failed_count} 个失败"
 
         tag = "waiting"
         if best.change_percent is not None:
@@ -525,12 +541,10 @@ class StockPriceApp(tk.Tk):
             symbol.canonical,
             values=(
                 symbol.canonical,
-                best.name or "--",
+                display_name,
                 price,
                 percentage,
                 f"{quote_time} {best.timezone}",
-                best.source,
-                status,
             ),
             tags=(tag,) if tag else (),
         )
@@ -539,8 +553,9 @@ class StockPriceApp(tk.Tk):
         if not self.tree.exists(symbol.canonical):
             return
         current = list(self.tree.item(symbol.canonical, "values"))
-        current[-1] = f"失败：{error[:80]}"
+        current[-1] = "获取失败"
         self.tree.item(symbol.canonical, values=current, tags=("waiting",))
+        self.status_var.set(f"{symbol.canonical} 行情获取失败：{error[:100]}")
 
     def _finish_refresh(self, count: int, finished_at: datetime) -> None:
         self._refreshing = False
