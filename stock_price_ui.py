@@ -458,7 +458,7 @@ class StockPriceApp(tk.Tk):
             self.suggestion_list.configure(height=min(6, len(results)))
             failed = f"，{len(errors)} 个来源不可用" if errors else ""
             self.status_var.set(
-                f"找到 {len(results)} 个候选{failed}；点击候选项完成选择。"
+                f"找到 {len(results)} 个候选{failed}；点击候选项可直接添加。"
             )
         else:
             self.suggestion_list.insert(tk.END, "未找到匹配的美股或港股")
@@ -498,6 +498,8 @@ class StockPriceApp(tk.Tk):
         self.suggestion_list.selection_clear(0, tk.END)
         self.suggestion_list.selection_set(index)
         self._choose_suggestion()
+        if self._selected_result is not None:
+            self.add_stock()
 
     def _choose_suggestion(self, _event: tk.Event | None = None) -> str:
         selection = self.suggestion_list.curselection()
