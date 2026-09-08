@@ -69,6 +69,8 @@ ACCENT_HOVER = "#1D4ED8"
 ACCENT_SOFT = "#DBEAFE"
 BUY_COLOR = "#DC2626"
 SELL_COLOR = "#059669"
+HIGH_RETURN_BACKGROUND = "#FEF3C7"
+HIGH_RETURN_THRESHOLD = Decimal("0.20")
 DIVIDER = "#D7E0EC"
 STATE_VERSION = 4
 WINDOW_GEOMETRY_PATTERN = re.compile(
@@ -566,6 +568,10 @@ class StockTradeWindow(tk.Toplevel):
         self.trade_tree.column("return", width=85, anchor=tk.CENTER)
         self.trade_tree.tag_configure("buy", foreground=BUY_COLOR)
         self.trade_tree.tag_configure("sell", foreground=SELL_COLOR)
+        self.trade_tree.tag_configure(
+            "high_return",
+            background=HIGH_RETURN_BACKGROUND,
+        )
         scrollbar = ttk.Scrollbar(
             table_frame,
             orient=tk.VERTICAL,
@@ -621,7 +627,7 @@ class StockTradeWindow(tk.Toplevel):
                     profit,
                     return_rate,
                 ),
-                tags=("buy",) if record.trade_type == "买入" else ("sell",),
+                tags=self._trade_row_tags(record),
             )
         self.refresh_summary()
 
@@ -647,7 +653,17 @@ class StockTradeWindow(tk.Toplevel):
                 self.symbol,
                 record,
             )
-            self.trade_tree.item(item_id, values=values)
+            self.trade_tree.item(
+                item_id,
+                values=values,
+                tags=self._trade_row_tags(record),
+            )
+
+    def _trade_row_tags(self, record: TradeRecord) -> tuple[str, ...]:
+        tags = ["buy" if record.trade_type == "买入" else "sell"]
+        if self.owner._trade_return_exceeds_threshold(self.symbol, record):
+            tags.append("high_return")
+        return tuple(tags)
 
     @staticmethod
     def _metric_color(value: str) -> str:
@@ -1882,30 +1898,50 @@ class StockPriceApp(tk.Tk):
         symbol: StockSymbol,
         record: TradeRecord,
     ) -> tuple[str, str]:
+        values = self._calculate_trade_performance_values(symbol, record)
+        if values is None:
+            return "--", "--"
+
+        profit, return_rate, currency = values
+        return (
+            f"{profit:+,.2f} {currency}",
+            f"{return_rate * Decimal('100'):+.2f}%",
+        )
+
+    def _calculate_trade_performance_values(
+        self,
+        symbol: StockSymbol,
+        record: TradeRecord,
+    ) -> tuple[Decimal, Decimal, str] | None:
         current_quote = self.current_prices.get(symbol.canonical)
         if current_quote is None:
-            return "--", "--"
+            return None
 
         try:
             trade_price = Decimal(record.price)
             quantity = Decimal(record.quantity)
         except InvalidOperation:
-            return "--", "--"
+            return None
         if (
             trade_price <= 0
             or quantity <= 0
             or record.trade_type not in {"买入", "卖出"}
         ):
-            return "--", "--"
+            return None
 
         current_price, currency = current_quote
         direction = Decimal("1") if record.trade_type == "买入" else Decimal("-1")
         profit = (current_price - trade_price) * quantity * direction
         return_rate = (current_price - trade_price) / trade_price * direction
-        return (
-            f"{profit:+,.2f} {currency}",
-            f"{return_rate * Decimal('100'):+.2f}%",
-        )
+        return profit, return_rate, currency
+
+    def _trade_return_exceeds_threshold(
+        self,
+        symbol: StockSymbol,
+        record: TradeRecord,
+    ) -> bool:
+        values = self._calculate_trade_performance_values(symbol, record)
+        return values is not None and values[1] > HIGH_RETURN_THRESHOLD
 
     def _refresh_performance_cells(self, symbol: StockSymbol) -> None:
         tree = self._tree_for_symbol(symbol)
