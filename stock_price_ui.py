@@ -40,8 +40,6 @@ TABLE_COLUMNS = (
     "profit",
     "return",
 )
-TABLE_RESIZE_SPACER = "_resize_spacer"
-TREE_COLUMNS = (*TABLE_COLUMNS, TABLE_RESIZE_SPACER)
 TABLE_HEADINGS = {
     "code": "股票代码",
     "name": "中文名称",
@@ -681,6 +679,9 @@ class StockPriceApp(tk.Tk):
         self.market_pages: dict[str, ttk.Frame] = {}
         self._swipe_start: tuple[ttk.Treeview, int, int] | None = None
         self._column_resize_tree: ttk.Treeview | None = None
+        self._profit_return_resize_start: (
+            tuple[ttk.Treeview, int, int, int] | None
+        ) = None
         self._result_queue: queue.Queue[tuple] = queue.Queue()
         self._refreshing = False
         self._queue_after_id: str | None = None
@@ -799,7 +800,7 @@ class StockPriceApp(tk.Tk):
             bordercolor=ACCENT,
             lightcolor=ACCENT,
             darkcolor=ACCENT,
-            padding=(16, 8),
+            padding=(16, 3, 16, 4),
         )
         style.map(
             "Action.TButton",
@@ -931,7 +932,7 @@ class StockPriceApp(tk.Tk):
             command=self.refresh_all,
             style="Action.TButton",
         )
-        self.refresh_button.pack(side=tk.LEFT)
+        self.refresh_button.pack(side=tk.LEFT, padx=(14, 0))
 
         self.suggestion_frame = ttk.Frame(outer, padding=(84, 0, 136, 8))
         suggestion_border = tk.Frame(
@@ -975,7 +976,7 @@ class StockPriceApp(tk.Tk):
 
             tree = ttk.Treeview(
                 page,
-                columns=TREE_COLUMNS,
+                columns=TABLE_COLUMNS,
                 show="headings",
                 selectmode="extended",
             )
@@ -993,20 +994,13 @@ class StockPriceApp(tk.Tk):
                     anchor=tk.CENTER,
                     stretch=column in {"name", "profit"},
                 )
-            tree.heading(TABLE_RESIZE_SPACER, text="")
-            tree.column(
-                TABLE_RESIZE_SPACER,
-                width=16,
-                minwidth=16,
-                anchor=tk.CENTER,
-                stretch=False,
-            )
 
             tree.tag_configure("up", foreground=BUY_COLOR)
             tree.tag_configure("down", foreground=SELL_COLOR)
             tree.tag_configure("waiting", foreground=TEXT_SECONDARY)
             tree.bind("<Button-1>", self._clear_selection_on_blank)
             tree.bind("<ButtonPress-1>", self._begin_market_swipe, add="+")
+            tree.bind("<B1-Motion>", self._resize_profit_and_return, add="+")
             tree.bind("<ButtonRelease-1>", self._finish_market_swipe, add="+")
             tree.bind("<Shift-MouseWheel>", self._switch_market_with_wheel)
             tree.bind("<Double-1>", self._open_stock_trade_window)
@@ -1522,29 +1516,70 @@ class StockPriceApp(tk.Tk):
                 tree.selection_remove(*selected_items)
             tree.focus("")
 
-    def _begin_market_swipe(self, event: tk.Event) -> None:
+    def _begin_market_swipe(self, event: tk.Event) -> str | None:
         tree = event.widget
         if isinstance(tree, ttk.Treeview):
             if tree.identify_region(event.x, event.y) == "separator":
                 self._column_resize_tree = tree
                 self._swipe_start = None
-                return
+                if tree.identify_column(event.x) == (
+                    f"#{TABLE_COLUMNS.index('profit') + 1}"
+                ):
+                    self._profit_return_resize_start = (
+                        tree,
+                        event.x_root,
+                        int(tree.column("profit", "width")),
+                        int(tree.column("return", "width")),
+                    )
+                    return "break"
+                self._profit_return_resize_start = None
+                return None
             self._column_resize_tree = None
+            self._profit_return_resize_start = None
             self._swipe_start = (tree, event.x, event.y)
+        return None
 
-    def _finish_market_swipe(self, event: tk.Event) -> None:
+    def _resize_profit_and_return(self, event: tk.Event) -> str | None:
+        resize_start = self._profit_return_resize_start
+        if resize_start is None or event.widget is not resize_start[0]:
+            return None
+
+        tree, start_x, start_profit_width, start_return_width = resize_start
+        profit_minimum = int(tree.column("profit", "minwidth"))
+        return_minimum = int(tree.column("return", "minwidth"))
+        requested_delta = event.x_root - start_x
+        delta = max(
+            profit_minimum - start_profit_width,
+            min(start_return_width - return_minimum, requested_delta),
+        )
+        tree.column("profit", width=start_profit_width + delta)
+        tree.column("return", width=start_return_width - delta)
+        return "break"
+
+    def _finish_market_swipe(self, event: tk.Event) -> str | None:
+        paired_resize = self._profit_return_resize_start
+        self._profit_return_resize_start = None
+        if paired_resize is not None and paired_resize[0] is event.widget:
+            resize_tree = paired_resize[0]
+            self._column_resize_tree = None
+            self._swipe_start = None
+            self.after_idle(
+                lambda source=resize_tree: self._synchronize_column_widths(source)
+            )
+            return "break"
+
         resize_tree = self._column_resize_tree
         self._column_resize_tree = None
         if resize_tree is event.widget:
             self.after_idle(
                 lambda source=resize_tree: self._synchronize_column_widths(source)
             )
-            return
+            return None
 
         swipe_start = self._swipe_start
         self._swipe_start = None
         if swipe_start is None or event.widget is not swipe_start[0]:
-            return
+            return None
 
         horizontal_distance = event.x - swipe_start[1]
         vertical_distance = event.y - swipe_start[2]
@@ -1553,6 +1588,7 @@ class StockPriceApp(tk.Tk):
             and abs(horizontal_distance) > abs(vertical_distance) * 1.5
         ):
             self._switch_market_page(1 if horizontal_distance < 0 else -1)
+        return None
 
     def _synchronize_column_widths(self, source: ttk.Treeview) -> None:
         widths = {
