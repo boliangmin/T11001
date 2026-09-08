@@ -9,7 +9,10 @@ import queue
 import re
 import threading
 import tkinter as tk
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from tkinter import messagebox, ttk
 from tkinter import font as tkfont
@@ -43,7 +46,7 @@ DEFAULT_COLUMN_WIDTHS = {
     "change": 90,
     "time": 220,
 }
-STATE_VERSION = 2
+STATE_VERSION = 3
 WINDOW_GEOMETRY_PATTERN = re.compile(
     r"^(?P<width>\d+)x(?P<height>\d+)(?P<x>[+-]\d+)(?P<y>[+-]\d+)$"
 )
@@ -60,6 +63,221 @@ def _contains_chinese(value: str) -> bool:
     return any("\u3400" <= character <= "\u9fff" for character in value)
 
 
+@dataclass(frozen=True)
+class TradeRecord:
+    trade_time: str
+    price: str
+
+
+class TradeEntryDialog(tk.Toplevel):
+    def __init__(
+        self,
+        owner: tk.Toplevel,
+        currency: str,
+        on_save: Callable[[TradeRecord], bool],
+    ) -> None:
+        super().__init__(owner)
+        self._on_save = on_save
+        self.title("增加交易")
+        self.resizable(False, False)
+        self.transient(owner)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        content = ttk.Frame(self, padding=(22, 18, 22, 16))
+        content.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(content, text="交易时间").grid(
+            row=0,
+            column=0,
+            sticky=tk.W,
+            pady=(0, 12),
+        )
+        self.time_var = tk.StringVar(
+            value=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+        self.time_entry = ttk.Entry(
+            content,
+            textvariable=self.time_var,
+            width=28,
+        )
+        self.time_entry.grid(row=0, column=1, sticky=tk.EW, pady=(0, 12))
+
+        ttk.Label(content, text=f"交易价格（{currency}）").grid(
+            row=1,
+            column=0,
+            sticky=tk.W,
+            pady=(0, 16),
+        )
+        self.price_var = tk.StringVar()
+        self.price_entry = ttk.Entry(
+            content,
+            textvariable=self.price_var,
+            width=28,
+        )
+        self.price_entry.grid(row=1, column=1, sticky=tk.EW, pady=(0, 16))
+
+        buttons = ttk.Frame(content)
+        buttons.grid(row=2, column=0, columnspan=2, sticky=tk.E)
+        ttk.Button(buttons, text="取消", command=self.destroy).pack(
+            side=tk.LEFT,
+            padx=(0, 8),
+        )
+        ttk.Button(
+            buttons,
+            text="保存",
+            command=self._submit,
+            style="Primary.TButton",
+        ).pack(side=tk.LEFT)
+        content.columnconfigure(1, weight=1)
+
+        self.bind("<Return>", lambda _event: self._submit())
+        self.bind("<Escape>", lambda _event: self.destroy())
+        self.grab_set()
+        self.after_idle(self._place_and_focus)
+
+    def _place_and_focus(self) -> None:
+        self.update_idletasks()
+        owner = self.master
+        x = owner.winfo_rootx() + max(0, (owner.winfo_width() - self.winfo_width()) // 2)
+        y = owner.winfo_rooty() + max(0, (owner.winfo_height() - self.winfo_height()) // 2)
+        self.geometry(f"+{x}+{y}")
+        self.price_entry.focus_set()
+
+    def _submit(self) -> None:
+        raw_time = self.time_var.get().strip()
+        parsed_time: datetime | None = None
+        for time_format in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                parsed_time = datetime.strptime(raw_time, time_format)
+                break
+            except ValueError:
+                continue
+        if parsed_time is None:
+            messagebox.showerror(
+                "交易时间格式错误",
+                "请输入 YYYY-MM-DD HH:MM 或 YYYY-MM-DD HH:MM:SS 格式的时间。",
+                parent=self,
+            )
+            self.time_entry.focus_set()
+            return
+
+        raw_price = self.price_var.get().strip().replace(",", "")
+        try:
+            price_value = Decimal(raw_price)
+        except InvalidOperation:
+            price_value = Decimal(0)
+        if not price_value.is_finite() or price_value <= 0:
+            messagebox.showerror(
+                "交易价格错误",
+                "请输入大于 0 的有效交易价格。",
+                parent=self,
+            )
+            self.price_entry.focus_set()
+            return
+
+        normalized_price = format(price_value.normalize(), "f")
+        record = TradeRecord(
+            trade_time=parsed_time.strftime("%Y-%m-%d %H:%M:%S"),
+            price=normalized_price,
+        )
+        if self._on_save(record):
+            self.destroy()
+
+
+class StockTradeWindow(tk.Toplevel):
+    def __init__(
+        self,
+        owner: "StockPriceApp",
+        symbol: StockSymbol,
+        display_name: str,
+    ) -> None:
+        super().__init__(owner)
+        self.owner = owner
+        self.symbol = symbol
+        self.currency = "USD" if symbol.market == "US" else "HKD"
+        self.title(f"交易记录 - {display_name or symbol.canonical}")
+        self.geometry("650x430")
+        self.minsize(520, 340)
+        self.transient(owner)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+        outer = ttk.Frame(self, padding=(20, 18, 20, 16))
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        header = ttk.Frame(outer)
+        header.pack(fill=tk.X, pady=(0, 14))
+        ttk.Label(
+            header,
+            text=f"{display_name or '--'}  ·  {symbol.canonical}",
+            style="Title.TLabel",
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            header,
+            text="增加交易",
+            command=self._open_entry_dialog,
+            style="Primary.TButton",
+        ).pack(side=tk.RIGHT)
+
+        table_frame = ttk.Frame(outer)
+        table_frame.pack(fill=tk.BOTH, expand=True)
+        self.trade_tree = ttk.Treeview(
+            table_frame,
+            columns=("trade_time", "price"),
+            show="headings",
+        )
+        self.trade_tree.heading("trade_time", text="交易时间", anchor=tk.CENTER)
+        self.trade_tree.heading("price", text="交易价格", anchor=tk.CENTER)
+        self.trade_tree.column("trade_time", width=280, anchor=tk.CENTER)
+        self.trade_tree.column("price", width=220, anchor=tk.CENTER)
+        scrollbar = ttk.Scrollbar(
+            table_frame,
+            orient=tk.VERTICAL,
+            command=self.trade_tree.yview,
+        )
+        self.trade_tree.configure(yscrollcommand=scrollbar.set)
+        self.trade_tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            outer,
+            text="交易记录保存在本机；行情接口价格不会作为交易记录保存。",
+            style="Hint.TLabel",
+        ).pack(anchor=tk.W, pady=(10, 0))
+        self._reload_records()
+
+    def _reload_records(self) -> None:
+        self.trade_tree.delete(*self.trade_tree.get_children(""))
+        for index, record in enumerate(
+            self.owner.trades.get(self.symbol.canonical, [])
+        ):
+            self.trade_tree.insert(
+                "",
+                tk.END,
+                iid=f"trade-{index}",
+                values=(record.trade_time, f"{record.price} {self.currency}"),
+            )
+
+    def _open_entry_dialog(self) -> None:
+        TradeEntryDialog(self, self.currency, self._save_record)
+
+    def _save_record(self, record: TradeRecord) -> bool:
+        if not self.owner._add_trade_record(self.symbol, record):
+            messagebox.showerror(
+                "保存失败",
+                "交易记录未能写入本机保存文件，请检查目录权限后重试。",
+                parent=self,
+            )
+            return False
+        self._reload_records()
+        return True
+
+    def _close(self) -> None:
+        self.owner._trade_windows.pop(self.symbol.canonical, None)
+        self.destroy()
+
+
 class StockPriceApp(tk.Tk):
     def __init__(self, state_path: Path | None = None) -> None:
         super().__init__()
@@ -70,6 +288,8 @@ class StockPriceApp(tk.Tk):
         self._state_path = state_path or _default_state_path()
         self.symbols: dict[str, StockSymbol] = {}
         self.display_names: dict[str, str] = {}
+        self.trades: dict[str, list[TradeRecord]] = {}
+        self._trade_windows: dict[str, StockTradeWindow] = {}
         self.trees: dict[str, ttk.Treeview] = {}
         self.market_pages: dict[str, ttk.Frame] = {}
         self._swipe_start: tuple[ttk.Treeview, int, int] | None = None
@@ -221,6 +441,7 @@ class StockPriceApp(tk.Tk):
             tree.bind("<ButtonPress-1>", self._begin_market_swipe, add="+")
             tree.bind("<ButtonRelease-1>", self._finish_market_swipe, add="+")
             tree.bind("<Shift-MouseWheel>", self._switch_market_with_wheel)
+            tree.bind("<Double-1>", self._open_stock_trade_window)
             tree.bind("<Delete>", self.remove_selected)
 
             vertical = ttk.Scrollbar(page, orient=tk.VERTICAL, command=tree.yview)
@@ -310,7 +531,7 @@ class StockPriceApp(tk.Tk):
 
         try:
             payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict) or payload.get("version") not in {1, 2}:
+            if not isinstance(payload, dict) or payload.get("version") not in {1, 2, 3}:
                 raise ValueError("保存文件版本不受支持")
 
             layout_restored = self._restore_geometry(payload.get("window_geometry"))
@@ -371,6 +592,28 @@ class StockPriceApp(tk.Tk):
                     if not first_restored_market:
                         first_restored_market = symbol.market
 
+            saved_trades = payload.get("trades")
+            if isinstance(saved_trades, dict):
+                for raw_symbol, raw_records in saved_trades.items():
+                    try:
+                        trade_symbol = normalize_symbol(str(raw_symbol))
+                    except ValueError:
+                        continue
+                    if not isinstance(raw_records, list):
+                        continue
+                    records: list[TradeRecord] = []
+                    for raw_record in raw_records:
+                        if not isinstance(raw_record, dict):
+                            continue
+                        trade_time = str(raw_record.get("trade_time") or "").strip()
+                        price = str(raw_record.get("price") or "").strip()
+                        if trade_time and price:
+                            records.append(
+                                TradeRecord(trade_time=trade_time, price=price)
+                            )
+                    if records:
+                        self.trades[trade_symbol.canonical] = records
+
             active_market = str(payload.get("active_market") or "")
             if active_market not in self.market_pages:
                 active_market = first_restored_market
@@ -405,6 +648,17 @@ class StockPriceApp(tk.Tk):
             },
             "active_market": self._active_market(),
             "stocks": [],
+            "trades": {
+                symbol: [
+                    {
+                        "trade_time": record.trade_time,
+                        "price": record.price,
+                    }
+                    for record in records
+                ]
+                for symbol, records in self.trades.items()
+                if records
+            },
         }
         for market in MARKET_ORDER:
             for item_id in self.trees[market].get_children(""):
@@ -702,6 +956,50 @@ class StockPriceApp(tk.Tk):
         self._select_market(target_market)
         if not self._refreshing:
             self.status_var.set(f"已切换至{MARKET_TITLES[target_market]}列表。")
+
+    def _open_stock_trade_window(self, event: tk.Event) -> str | None:
+        tree = event.widget
+        if not isinstance(tree, ttk.Treeview):
+            return None
+        item_id = tree.identify_row(event.y)
+        symbol = self.symbols.get(item_id)
+        if symbol is None:
+            return None
+        self._show_stock_trade_window(symbol)
+        return "break"
+
+    def _show_stock_trade_window(self, symbol: StockSymbol) -> StockTradeWindow:
+        existing = self._trade_windows.get(symbol.canonical)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return existing
+
+        window = StockTradeWindow(
+            self,
+            symbol,
+            self.display_names.get(symbol.canonical, ""),
+        )
+        self._trade_windows[symbol.canonical] = window
+        return window
+
+    def _add_trade_record(
+        self,
+        symbol: StockSymbol,
+        record: TradeRecord,
+    ) -> bool:
+        records = self.trades.setdefault(symbol.canonical, [])
+        records.append(record)
+        if self._save_state():
+            self.status_var.set(
+                f"已保存 {symbol.canonical} 的交易记录：{record.trade_time}。"
+            )
+            return True
+        records.pop()
+        if not records:
+            self.trades.pop(symbol.canonical, None)
+        return False
 
     def remove_selected(self, event: tk.Event | None = None) -> None:
         if self._refreshing:
