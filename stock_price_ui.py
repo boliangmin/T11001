@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import calendar
 import json
+import msvcrt
 import os
 import queue
 import re
@@ -134,6 +135,10 @@ class TradeRecord:
     price: str
     quantity: str
     trade_type: str
+
+
+class AlreadyRunningError(RuntimeError):
+    """同一份本地状态文件已经由另一个窗口占用。"""
 
 
 class CalendarPopup(tk.Toplevel):
@@ -855,6 +860,16 @@ class StockPriceApp(tk.Tk):
         self.minsize(820, 430)
 
         self._state_path = state_path or _default_state_path()
+        self._state_lock_handle = None
+        if not self._acquire_state_lock():
+            messagebox.showwarning(
+                "程序已在运行",
+                "检测到另一个股票行情窗口正在使用同一份数据。\n"
+                "请先关闭已有窗口，再重新启动，避免交易记录被旧窗口覆盖。",
+                parent=self,
+            )
+            self.destroy()
+            raise AlreadyRunningError("股票行情程序已经在运行")
         self.symbols: dict[str, StockSymbol] = {}
         self.display_names: dict[str, str] = {}
         self.trades: dict[str, list[TradeRecord]] = {}
@@ -1226,6 +1241,39 @@ class StockPriceApp(tk.Tk):
         self.geometry(f"{width}x{height}")
         return True
 
+    def _acquire_state_lock(self) -> bool:
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = self._state_path.with_name(f"{self._state_path.name}.lock")
+            lock_handle = lock_path.open("a+b")
+            lock_handle.seek(0, os.SEEK_END)
+            if lock_handle.tell() == 0:
+                lock_handle.write(b"\0")
+                lock_handle.flush()
+            lock_handle.seek(0)
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            try:
+                lock_handle.close()
+            except (NameError, OSError):
+                pass
+            return False
+        self._state_lock_handle = lock_handle
+        return True
+
+    def _release_state_lock(self) -> None:
+        lock_handle = self._state_lock_handle
+        self._state_lock_handle = None
+        if lock_handle is None:
+            return
+        try:
+            lock_handle.seek(0)
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        finally:
+            lock_handle.close()
+
     def _active_market(self) -> str:
         selected_page = self.table_frame.select()
         for market, page in self.market_pages.items():
@@ -1506,6 +1554,7 @@ class StockPriceApp(tk.Tk):
             self.after_cancel(self._startup_refresh_after_id)
             self._startup_refresh_after_id = None
         self._save_state()
+        self._release_state_lock()
         self.destroy()
 
     def _on_query_changed(self, *_args: object) -> None:
@@ -2192,7 +2241,10 @@ class StockPriceApp(tk.Tk):
 
 
 def main() -> None:
-    app = StockPriceApp()
+    try:
+        app = StockPriceApp()
+    except AlreadyRunningError:
+        return
     app.mainloop()
 
 
