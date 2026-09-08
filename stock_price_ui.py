@@ -37,6 +37,7 @@ TABLE_COLUMNS = (
     "name",
     "price",
     "change",
+    "cost",
     "profit",
     "return",
 )
@@ -45,15 +46,17 @@ TABLE_HEADINGS = {
     "name": "中文名称",
     "price": "最新价格",
     "change": "涨跌幅",
+    "cost": "持仓成本",
     "profit": "盈亏",
     "return": "收益率",
 }
 DEFAULT_COLUMN_WIDTHS = {
-    "code": 100,
-    "name": 150,
-    "price": 120,
-    "change": 85,
-    "profit": 130,
+    "code": 95,
+    "name": 135,
+    "price": 110,
+    "change": 75,
+    "cost": 100,
+    "profit": 125,
     "return": 95,
 }
 APP_BACKGROUND = "#F4F7FB"
@@ -500,17 +503,39 @@ class StockTradeWindow(tk.Toplevel):
 
         header = ttk.Frame(outer)
         header.pack(fill=tk.X, pady=(0, 14))
+        title_area = ttk.Frame(header)
+        title_area.pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Label(
-            header,
+            title_area,
             text=f"{display_name or '--'}  ·  {symbol.canonical}",
             style="Title.TLabel",
-        ).pack(side=tk.LEFT)
+        ).pack(anchor=tk.W)
+
+        metrics = ttk.Frame(title_area)
+        metrics.pack(anchor=tk.W, pady=(7, 0))
+        self.profit_summary_var = tk.StringVar(value="--")
+        self.return_summary_var = tk.StringVar(value="--")
+        ttk.Label(metrics, text="盈亏", style="Hint.TLabel").pack(side=tk.LEFT)
+        self.profit_summary_label = ttk.Label(
+            metrics,
+            textvariable=self.profit_summary_var,
+            font=("Microsoft YaHei UI", 11, "bold"),
+        )
+        self.profit_summary_label.pack(side=tk.LEFT, padx=(8, 28))
+        ttk.Label(metrics, text="收益率", style="Hint.TLabel").pack(side=tk.LEFT)
+        self.return_summary_label = ttk.Label(
+            metrics,
+            textvariable=self.return_summary_var,
+            font=("Microsoft YaHei UI", 11, "bold"),
+        )
+        self.return_summary_label.pack(side=tk.LEFT, padx=(8, 0))
+
         ttk.Button(
             header,
             text="增加交易",
             command=self._open_entry_dialog,
             style="Primary.TButton",
-        ).pack(side=tk.RIGHT)
+        ).pack(side=tk.RIGHT, anchor=tk.N)
 
         table_frame = ttk.Frame(outer)
         table_frame.pack(fill=tk.BOTH, expand=True)
@@ -553,6 +578,7 @@ class StockTradeWindow(tk.Toplevel):
         )
         self.context_menu.add_command(label="修改", command=self._modify_selected)
         self.context_menu.add_command(label="删除", command=self._delete_selected)
+        self.trade_tree.bind("<Button-1>", self._clear_selection_on_blank)
         self.trade_tree.bind("<Button-3>", self._show_context_menu)
 
         ttk.Label(
@@ -580,6 +606,35 @@ class StockTradeWindow(tk.Toplevel):
                 ),
                 tags=("buy",) if record.trade_type == "买入" else ("sell",),
             )
+        self.refresh_summary()
+
+    def refresh_summary(self) -> None:
+        profit, return_rate = self.owner._calculate_performance(self.symbol)
+        self.profit_summary_var.set(profit)
+        self.return_summary_var.set(return_rate)
+        self.profit_summary_label.configure(
+            foreground=self._metric_color(profit)
+        )
+        self.return_summary_label.configure(
+            foreground=self._metric_color(return_rate)
+        )
+
+    @staticmethod
+    def _metric_color(value: str) -> str:
+        if value.startswith("+"):
+            return BUY_COLOR
+        if value.startswith("-"):
+            return SELL_COLOR
+        return TEXT_SECONDARY
+
+    def _clear_selection_on_blank(self, event: tk.Event) -> None:
+        row_id = self.trade_tree.identify_row(event.y)
+        region = self.trade_tree.identify_region(event.x, event.y)
+        if not row_id and region not in {"heading", "separator"}:
+            selected_items = self.trade_tree.selection()
+            if selected_items:
+                self.trade_tree.selection_remove(*selected_items)
+            self.trade_tree.focus("")
 
     def _open_entry_dialog(self) -> None:
         TradeEntryDialog(self, self.currency, self._save_record)
@@ -1113,6 +1168,29 @@ class StockPriceApp(tk.Tk):
                     if isinstance((width := saved_market_widths.get(column)), int)
                     and 60 <= width <= 2000
                 }
+                legacy_columns = tuple(
+                    column for column in TABLE_COLUMNS if column != "cost"
+                )
+                if (
+                    "cost" not in saved_market_widths
+                    and all(column in valid_widths for column in legacy_columns)
+                ):
+                    cost_width = DEFAULT_COLUMN_WIDTHS["cost"]
+                    valid_widths["cost"] = cost_width
+                    remaining_reduction = cost_width
+                    for donor in sorted(
+                        ("name", "profit"),
+                        key=lambda column: valid_widths[column],
+                        reverse=True,
+                    ):
+                        reduction = min(
+                            remaining_reduction,
+                            valid_widths[donor] - 60,
+                        )
+                        valid_widths[donor] -= reduction
+                        remaining_reduction -= reduction
+                        if remaining_reduction == 0:
+                            break
                 if len(valid_widths) == len(TABLE_COLUMNS):
                     widths_by_market = {
                         market: valid_widths.copy() for market in MARKET_ORDER
@@ -1148,6 +1226,7 @@ class StockPriceApp(tk.Tk):
                         values=(
                             symbol.canonical,
                             display_name or "--",
+                            "--",
                             "--",
                             "--",
                             "--",
@@ -1202,6 +1281,9 @@ class StockPriceApp(tk.Tk):
                             )
                     if records:
                         self.trades[trade_symbol.canonical] = records
+
+            for symbol in self.symbols.values():
+                self._refresh_performance_cells(symbol)
 
             active_market = str(payload.get("active_market") or "")
             if active_market not in self.market_pages:
@@ -1487,6 +1569,7 @@ class StockPriceApp(tk.Tk):
                 "--",
                 "--",
                 "--",
+                "--",
             ),
             tags=("waiting",),
         )
@@ -1714,13 +1797,18 @@ class StockPriceApp(tk.Tk):
         self._save_state()
         self.status_var.set(f"列表中共有 {len(self.symbols)} 只股票。")
 
-    def _calculate_performance(self, symbol: StockSymbol) -> tuple[str, str]:
+    def _calculate_position_metrics(
+        self,
+        symbol: StockSymbol,
+    ) -> tuple[str, str, str]:
         current_quote = self.current_prices.get(symbol.canonical)
         records = self.trades.get(symbol.canonical, [])
-        if current_quote is None or not records:
-            return "--", "--"
+        if not records:
+            return "--", "--", "--"
 
-        current_price, currency = current_quote
+        currency = (
+            current_quote[1] if current_quote is not None else symbol.default_currency
+        )
         buy_cost = Decimal("0")
         sell_proceeds = Decimal("0")
         net_quantity = Decimal("0")
@@ -1735,8 +1823,17 @@ class StockPriceApp(tk.Tk):
                     sell_proceeds += amount
                     net_quantity -= quantity
         except InvalidOperation:
-            return "--", "--"
+            return "--", "--", "--"
 
+        holding_cost_text = (
+            "--"
+            if net_quantity <= 0
+            else f"{(buy_cost - sell_proceeds) / net_quantity:,.3f} {currency}"
+        )
+        if current_quote is None:
+            return holding_cost_text, "--", "--"
+
+        current_price, _currency = current_quote
         profit = current_price * net_quantity + sell_proceeds - buy_cost
         profit_text = f"{profit:+,.2f} {currency}"
         return_text = (
@@ -1744,7 +1841,11 @@ class StockPriceApp(tk.Tk):
             if buy_cost <= 0
             else f"{profit / buy_cost * Decimal('100'):+.2f}%"
         )
-        return profit_text, return_text
+        return holding_cost_text, profit_text, return_text
+
+    def _calculate_performance(self, symbol: StockSymbol) -> tuple[str, str]:
+        _, profit, return_rate = self._calculate_position_metrics(symbol)
+        return profit, return_rate
 
     def _refresh_performance_cells(self, symbol: StockSymbol) -> None:
         tree = self._tree_for_symbol(symbol)
@@ -1753,8 +1854,13 @@ class StockPriceApp(tk.Tk):
         current = list(tree.item(symbol.canonical, "values"))
         if len(current) != len(TABLE_COLUMNS):
             return
-        current[4], current[5] = self._calculate_performance(symbol)
+        current[4], current[5], current[6] = self._calculate_position_metrics(
+            symbol
+        )
         tree.item(symbol.canonical, values=current)
+        trade_window = self._trade_windows.get(symbol.canonical)
+        if trade_window is not None and trade_window.winfo_exists():
+            trade_window.refresh_summary()
 
     def _start_refresh(self, symbols: list[StockSymbol]) -> None:
         if self._refreshing:
@@ -1857,7 +1963,7 @@ class StockPriceApp(tk.Tk):
             Decimal(str(best.price)),
             best.currency,
         )
-        profit, return_rate = self._calculate_performance(symbol)
+        holding_cost, profit, return_rate = self._calculate_position_metrics(symbol)
 
         tag = "waiting"
         if best.change_percent is not None:
@@ -1870,11 +1976,15 @@ class StockPriceApp(tk.Tk):
                 display_name,
                 price,
                 percentage,
+                holding_cost,
                 profit,
                 return_rate,
             ),
             tags=(tag,) if tag else (),
         )
+        trade_window = self._trade_windows.get(symbol.canonical)
+        if trade_window is not None and trade_window.winfo_exists():
+            trade_window.refresh_summary()
         self._save_state()
 
     def _show_row_error(self, symbol: StockSymbol, error: str) -> None:
