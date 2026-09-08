@@ -165,42 +165,57 @@ class CalendarPopup(tk.Toplevel):
         self.transient(owner)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
-        outer = ttk.Frame(self, padding=(14, 12, 14, 12))
+        outer = ttk.Frame(self, padding=(16, 14, 16, 14))
         outer.pack(fill=tk.BOTH, expand=True)
         controls = ttk.Frame(outer)
-        controls.pack(fill=tk.X, pady=(0, 8))
-        ttk.Button(controls, text="‹", width=3, command=self._previous_month).pack(
-            side=tk.LEFT
-        )
-        self.year_var = tk.IntVar(value=self._year)
-        year_spinner = ttk.Spinbox(
+        controls.pack(fill=tk.X, pady=(0, 12))
+        ttk.Button(
             controls,
-            from_=1900,
-            to=2100,
+            text="← 上个月",
+            width=10,
+            command=self._previous_month,
+            style="Action.TButton",
+        ).pack(side=tk.LEFT)
+
+        selectors = ttk.Frame(controls)
+        selectors.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=12)
+        self.year_var = tk.StringVar(value=f"{self._year} 年")
+        self.year_selector = ttk.Combobox(
+            selectors,
+            values=tuple(f"{year} 年" for year in range(1900, 2101)),
             textvariable=self.year_var,
-            width=7,
-            command=self._render_from_controls,
+            width=8,
+            state="readonly",
+            justify=tk.CENTER,
+            style="Calendar.TCombobox",
         )
-        year_spinner.pack(side=tk.LEFT, padx=(18, 4))
-        ttk.Label(controls, text="年").pack(side=tk.LEFT)
-        self.month_var = tk.IntVar(value=self._month)
-        month_spinner = ttk.Spinbox(
-            controls,
-            from_=1,
-            to=12,
+        self.year_selector.pack(side=tk.LEFT, expand=True)
+        self.month_var = tk.StringVar(value=f"{self._month} 月")
+        self.month_selector = ttk.Combobox(
+            selectors,
+            values=tuple(f"{month} 月" for month in range(1, 13)),
             textvariable=self.month_var,
-            width=4,
-            command=self._render_from_controls,
+            width=6,
+            state="readonly",
+            justify=tk.CENTER,
+            style="Calendar.TCombobox",
         )
-        month_spinner.pack(side=tk.LEFT, padx=(10, 4))
-        ttk.Label(controls, text="月").pack(side=tk.LEFT)
-        ttk.Button(controls, text="›", width=3, command=self._next_month).pack(
-            side=tk.RIGHT
+        self.month_selector.pack(side=tk.LEFT, expand=True, padx=(10, 0))
+        ttk.Button(
+            controls,
+            text="下个月 →",
+            width=10,
+            command=self._next_month,
+            style="Action.TButton",
+        ).pack(side=tk.RIGHT)
+        self.year_selector.bind(
+            "<<ComboboxSelected>>",
+            self._render_from_controls,
         )
-        year_spinner.bind("<Return>", self._render_from_controls)
-        month_spinner.bind("<Return>", self._render_from_controls)
-        year_spinner.bind("<FocusOut>", self._render_from_controls)
-        month_spinner.bind("<FocusOut>", self._render_from_controls)
+        self.month_selector.bind(
+            "<<ComboboxSelected>>",
+            self._render_from_controls,
+        )
 
         self.days_frame = ttk.Frame(outer)
         self.days_frame.pack(fill=tk.BOTH, expand=True)
@@ -215,8 +230,8 @@ class CalendarPopup(tk.Toplevel):
 
     def _render_from_controls(self, _event: tk.Event | None = None) -> None:
         try:
-            year = int(self.year_var.get())
-            month = int(self.month_var.get())
+            year = int(self.year_var.get().removesuffix("年").strip())
+            month = int(self.month_var.get().removesuffix("月").strip())
         except (tk.TclError, ValueError):
             return
         if not 1900 <= year <= 2100 or not 1 <= month <= 12:
@@ -232,8 +247,8 @@ class CalendarPopup(tk.Toplevel):
             return
         self._year = year
         self._month = zero_based_month + 1
-        self.year_var.set(self._year)
-        self.month_var.set(self._month)
+        self.year_var.set(f"{self._year} 年")
+        self.month_var.set(f"{self._month} 月")
         self._render_days()
 
     def _previous_month(self) -> None:
@@ -245,7 +260,9 @@ class CalendarPopup(tk.Toplevel):
     def _render_days(self) -> None:
         for widget in self.days_frame.winfo_children():
             widget.destroy()
-        for column, weekday in enumerate(("一", "二", "三", "四", "五", "六", "日")):
+        for column, weekday in enumerate(
+            ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+        ):
             ttk.Label(
                 self.days_frame,
                 text=weekday,
@@ -282,7 +299,7 @@ class CalendarPopup(tk.Toplevel):
                 ttk.Button(
                     self.days_frame,
                     text=str(day_number),
-                    width=4,
+                    width=5,
                     style="SelectedDay.TButton" if is_selected else "TButton",
                     command=lambda day=day_number: self._select_day(day),
                 ).grid(row=row, column=column, padx=2, pady=2)
@@ -955,6 +972,25 @@ class StockPriceApp(tk.Tk):
             lightcolor=DIVIDER,
             darkcolor=DIVIDER,
             padding=4,
+        )
+        style.configure(
+            "Calendar.TCombobox",
+            fieldbackground=SURFACE,
+            background=SURFACE,
+            foreground=TEXT_PRIMARY,
+            arrowcolor=ACCENT,
+            bordercolor=DIVIDER,
+            lightcolor=DIVIDER,
+            darkcolor=DIVIDER,
+            padding=5,
+        )
+        style.map(
+            "Calendar.TCombobox",
+            fieldbackground=[("readonly", SURFACE)],
+            foreground=[("readonly", TEXT_PRIMARY)],
+            bordercolor=[("focus", ACCENT)],
+            lightcolor=[("focus", ACCENT)],
+            darkcolor=[("focus", ACCENT)],
         )
         style.configure(
             "TButton",
