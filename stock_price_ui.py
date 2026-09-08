@@ -174,13 +174,12 @@ class StockPriceApp(tk.Tk):
             "time": 220,
         }
         for column in columns:
-            anchor = tk.E if column in {"price", "change"} else tk.W
-            self.tree.heading(column, text=headings[column])
+            self.tree.heading(column, text=headings[column], anchor=tk.CENTER)
             self.tree.column(
                 column,
                 width=widths[column],
                 minwidth=70,
-                anchor=anchor,
+                anchor=tk.CENTER,
                 stretch=column in {"name", "time"},
             )
 
