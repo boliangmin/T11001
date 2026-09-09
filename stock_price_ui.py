@@ -38,6 +38,7 @@ TABLE_COLUMNS = (
     "name",
     "price",
     "change",
+    "holding",
     "cost",
     "profit",
     "return",
@@ -47,6 +48,7 @@ TABLE_HEADINGS = {
     "name": "中文名称",
     "price": "最新价格",
     "change": "涨跌幅",
+    "holding": "持仓数",
     "cost": "持仓成本",
     "profit": "盈亏",
     "return": "收益率",
@@ -56,6 +58,7 @@ DEFAULT_COLUMN_WIDTHS = {
     "name": 135,
     "price": 110,
     "change": 75,
+    "holding": 80,
     "cost": 100,
     "profit": 125,
     "return": 95,
@@ -551,8 +554,15 @@ class StockTradeWindow(tk.Toplevel):
 
         metrics = ttk.Frame(title_area)
         metrics.pack(anchor=tk.W, pady=(8, 0))
+        self.holding_summary_var = tk.StringVar(value="--")
         self.profit_summary_var = tk.StringVar(value="--")
         self.return_summary_var = tk.StringVar(value="--")
+        ttk.Label(metrics, text="持仓数", style="Hint.TLabel").pack(side=tk.LEFT)
+        ttk.Label(
+            metrics,
+            textvariable=self.holding_summary_var,
+            font=("Microsoft YaHei UI", 11, "bold"),
+        ).pack(side=tk.LEFT, padx=(8, 24))
         ttk.Label(metrics, text="总盈亏", style="Hint.TLabel").pack(side=tk.LEFT)
         self.profit_summary_label = ttk.Label(
             metrics,
@@ -668,7 +678,10 @@ class StockTradeWindow(tk.Toplevel):
         self.refresh_summary()
 
     def refresh_summary(self) -> None:
-        profit, return_rate = self.owner._calculate_performance(self.symbol)
+        holding_count, _, profit, return_rate = (
+            self.owner._calculate_position_metrics(self.symbol)
+        )
+        self.holding_summary_var.set(holding_count)
         self.profit_summary_var.set(profit)
         self.return_summary_var.set(return_rate)
         self.profit_summary_label.configure(
@@ -1373,28 +1386,39 @@ class StockPriceApp(tk.Tk):
                     and 60 <= width <= 2000
                 }
                 legacy_columns = tuple(
-                    column for column in TABLE_COLUMNS if column != "cost"
+                    column
+                    for column in TABLE_COLUMNS
+                    if column not in {"holding", "cost"}
                 )
+                missing_metric_columns = [
+                    column
+                    for column in ("holding", "cost")
+                    if column not in saved_market_widths
+                ]
                 if (
-                    "cost" not in saved_market_widths
-                    and all(column in valid_widths for column in legacy_columns)
+                    all(column in valid_widths for column in legacy_columns)
+                    and all(
+                        column in valid_widths or column in missing_metric_columns
+                        for column in TABLE_COLUMNS
+                    )
                 ):
-                    cost_width = DEFAULT_COLUMN_WIDTHS["cost"]
-                    valid_widths["cost"] = cost_width
-                    remaining_reduction = cost_width
-                    for donor in sorted(
-                        ("name", "profit"),
-                        key=lambda column: valid_widths[column],
-                        reverse=True,
-                    ):
-                        reduction = min(
-                            remaining_reduction,
-                            valid_widths[donor] - 60,
-                        )
-                        valid_widths[donor] -= reduction
-                        remaining_reduction -= reduction
-                        if remaining_reduction == 0:
-                            break
+                    for missing_column in missing_metric_columns:
+                        added_width = DEFAULT_COLUMN_WIDTHS[missing_column]
+                        valid_widths[missing_column] = added_width
+                        remaining_reduction = added_width
+                        for donor in sorted(
+                            ("name", "profit"),
+                            key=lambda column: valid_widths[column],
+                            reverse=True,
+                        ):
+                            reduction = min(
+                                remaining_reduction,
+                                valid_widths[donor] - 60,
+                            )
+                            valid_widths[donor] -= reduction
+                            remaining_reduction -= reduction
+                            if remaining_reduction == 0:
+                                break
                 if len(valid_widths) == len(TABLE_COLUMNS):
                     widths_by_market = {
                         market: valid_widths.copy() for market in MARKET_ORDER
@@ -1430,6 +1454,7 @@ class StockPriceApp(tk.Tk):
                         values=(
                             symbol.canonical,
                             display_name or "--",
+                            "--",
                             "--",
                             "--",
                             "--",
@@ -1775,6 +1800,7 @@ class StockPriceApp(tk.Tk):
                 "--",
                 "--",
                 "--",
+                "--",
             ),
             tags=("waiting",),
         )
@@ -2005,11 +2031,11 @@ class StockPriceApp(tk.Tk):
     def _calculate_position_metrics(
         self,
         symbol: StockSymbol,
-    ) -> tuple[str, str, str]:
+    ) -> tuple[str, str, str, str]:
         current_quote = self.current_prices.get(symbol.canonical)
         records = self.trades.get(symbol.canonical, [])
         if not records:
-            return "--", "--", "--"
+            return "--", "--", "--", "--"
 
         currency = (
             current_quote[1] if current_quote is not None else symbol.default_currency
@@ -2028,15 +2054,16 @@ class StockPriceApp(tk.Tk):
                     sell_proceeds += amount
                     net_quantity -= quantity
         except InvalidOperation:
-            return "--", "--", "--"
+            return "--", "--", "--", "--"
 
+        holding_count_text = f"{net_quantity:,.0f}"
         holding_cost_text = (
             "--"
             if net_quantity <= 0
             else f"{(buy_cost - sell_proceeds) / net_quantity:,.3f} {currency}"
         )
         if current_quote is None:
-            return holding_cost_text, "--", "--"
+            return holding_count_text, holding_cost_text, "--", "--"
 
         current_price, _currency = current_quote
         profit = current_price * net_quantity + sell_proceeds - buy_cost
@@ -2046,10 +2073,10 @@ class StockPriceApp(tk.Tk):
             if buy_cost <= 0
             else f"{profit / buy_cost * Decimal('100'):+.2f}%"
         )
-        return holding_cost_text, profit_text, return_text
+        return holding_count_text, holding_cost_text, profit_text, return_text
 
     def _calculate_performance(self, symbol: StockSymbol) -> tuple[str, str]:
-        _, profit, return_rate = self._calculate_position_metrics(symbol)
+        _, _, profit, return_rate = self._calculate_position_metrics(symbol)
         return profit, return_rate
 
     def _calculate_trade_performance(
@@ -2109,8 +2136,8 @@ class StockPriceApp(tk.Tk):
         current = list(tree.item(symbol.canonical, "values"))
         if len(current) != len(TABLE_COLUMNS):
             return
-        current[4], current[5], current[6] = self._calculate_position_metrics(
-            symbol
+        current[4], current[5], current[6], current[7] = (
+            self._calculate_position_metrics(symbol)
         )
         tree.item(symbol.canonical, values=current)
         trade_window = self._trade_windows.get(symbol.canonical)
@@ -2218,7 +2245,9 @@ class StockPriceApp(tk.Tk):
             Decimal(str(best.price)),
             best.currency,
         )
-        holding_cost, profit, return_rate = self._calculate_position_metrics(symbol)
+        holding_count, holding_cost, profit, return_rate = (
+            self._calculate_position_metrics(symbol)
+        )
 
         tag = "waiting"
         if best.change_percent is not None:
@@ -2231,6 +2260,7 @@ class StockPriceApp(tk.Tk):
                 display_name,
                 price,
                 percentage,
+                holding_count,
                 holding_cost,
                 profit,
                 return_rate,
