@@ -538,6 +538,8 @@ class StockTradeWindow(tk.Toplevel):
         self.currency = "USD" if symbol.market == "US" else "HKD"
         self._sort_column: str | None = None
         self._sort_descending = False
+        self._syncing_trade_scroll = False
+        self._syncing_trade_selection = False
         self.title(f"交易记录 - {display_name or symbol.canonical}")
         self.geometry("650x430")
         self.minsize(520, 340)
@@ -557,20 +559,20 @@ class StockTradeWindow(tk.Toplevel):
         self.holding_summary_var = tk.StringVar(value="--")
         self.profit_summary_var = tk.StringVar(value="--")
         self.return_summary_var = tk.StringVar(value="--")
-        ttk.Label(metrics, text="持仓数", style="Hint.TLabel").pack(side=tk.LEFT)
+        ttk.Label(metrics, text="持仓数").pack(side=tk.LEFT)
         ttk.Label(
             metrics,
             textvariable=self.holding_summary_var,
             font=("Microsoft YaHei UI", 11, "bold"),
         ).pack(side=tk.LEFT, padx=(8, 24))
-        ttk.Label(metrics, text="总盈亏", style="Hint.TLabel").pack(side=tk.LEFT)
+        ttk.Label(metrics, text="总盈亏").pack(side=tk.LEFT)
         self.profit_summary_label = ttk.Label(
             metrics,
             textvariable=self.profit_summary_var,
             font=("Microsoft YaHei UI", 11, "bold"),
         )
         self.profit_summary_label.pack(side=tk.LEFT, padx=(8, 28))
-        ttk.Label(metrics, text="总收益率", style="Hint.TLabel").pack(side=tk.LEFT)
+        ttk.Label(metrics, text="总收益率").pack(side=tk.LEFT)
         self.return_summary_label = ttk.Label(
             metrics,
             textvariable=self.return_summary_var,
@@ -587,13 +589,28 @@ class StockTradeWindow(tk.Toplevel):
 
         table_frame = ttk.Frame(outer)
         table_frame.pack(fill=tk.BOTH, expand=True)
-        self.trade_tree = ttk.Treeview(
+        trade_column_widths = {
+            "trade_date": 100,
+            "trade_type": 70,
+            "price": 105,
+            "quantity": 80,
+            "profit": 125,
+            "return": 85,
+        }
+        self.trade_trees: dict[str, ttk.Treeview] = {}
+        self.trade_scrollbar = ttk.Scrollbar(
             table_frame,
-            columns=TRADE_COLUMNS,
-            show="headings",
-            selectmode="browse",
+            orient=tk.VERTICAL,
+            command=self._scroll_trade_trees,
         )
-        for column in TRADE_COLUMNS:
+        for column_index, column in enumerate(TRADE_COLUMNS):
+            tree = ttk.Treeview(
+                table_frame,
+                columns=(column,),
+                show="headings",
+                selectmode="browse",
+            )
+            self.trade_trees[column] = tree
             heading_options: dict[str, object] = {
                 "text": TRADE_HEADINGS[column],
                 "anchor": tk.CENTER,
@@ -605,29 +622,58 @@ class StockTradeWindow(tk.Toplevel):
                         descending=False,
                     )
                 )
-            self.trade_tree.heading(column, **heading_options)
-        self.trade_tree.column("trade_date", width=100, anchor=tk.CENTER)
-        self.trade_tree.column("trade_type", width=70, anchor=tk.CENTER)
-        self.trade_tree.column("price", width=105, anchor=tk.CENTER)
-        self.trade_tree.column("quantity", width=80, anchor=tk.CENTER)
-        self.trade_tree.column("profit", width=125, anchor=tk.CENTER)
-        self.trade_tree.column("return", width=85, anchor=tk.CENTER)
-        self.trade_tree.tag_configure("buy", foreground=BUY_COLOR)
-        self.trade_tree.tag_configure("sell", foreground=SELL_COLOR)
-        self.trade_tree.tag_configure(
-            "high_return",
-            background=HIGH_RETURN_BACKGROUND,
+            tree.heading(column, **heading_options)
+            tree.column(
+                column,
+                width=trade_column_widths[column],
+                minwidth=55,
+                anchor=tk.CENTER,
+                stretch=True,
+            )
+            tree.tag_configure(
+                "buy",
+                foreground=BUY_COLOR,
+                font=("Microsoft YaHei UI", 10, "bold"),
+            )
+            tree.tag_configure(
+                "sell",
+                foreground=SELL_COLOR,
+                font=("Microsoft YaHei UI", 10, "bold"),
+            )
+            tree.tag_configure("positive", foreground=BUY_COLOR)
+            tree.tag_configure("negative", foreground=SELL_COLOR)
+            tree.tag_configure(
+                "high_return",
+                background=HIGH_RETURN_BACKGROUND,
+            )
+            tree.configure(
+                yscrollcommand=lambda first, last, source=tree: (
+                    self._sync_trade_scroll(source, first, last)
+                )
+            )
+            tree.grid(row=0, column=column_index, sticky="nsew")
+            tree.bind("<Button-1>", self._clear_selection_on_blank)
+            tree.bind(
+                "<Button-3>",
+                lambda event, selected=column: self._show_context_menu(
+                    event,
+                    selected,
+                ),
+            )
+            tree.bind("<<TreeviewSelect>>", self._sync_trade_selection)
+            table_frame.columnconfigure(
+                column_index,
+                weight=trade_column_widths[column],
+                minsize=55,
+            )
+
+        self.trade_tree = self.trade_trees["trade_date"]
+        self.trade_scrollbar.grid(
+            row=0,
+            column=len(TRADE_COLUMNS),
+            sticky="ns",
         )
-        scrollbar = ttk.Scrollbar(
-            table_frame,
-            orient=tk.VERTICAL,
-            command=self.trade_tree.yview,
-        )
-        self.trade_tree.configure(yscrollcommand=scrollbar.set)
-        self.trade_tree.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
         table_frame.rowconfigure(0, weight=1)
-        table_frame.columnconfigure(0, weight=1)
 
         self.context_menu = tk.Menu(
             self,
@@ -641,8 +687,6 @@ class StockTradeWindow(tk.Toplevel):
         )
         self.context_menu.add_command(label="修改", command=self._modify_selected)
         self.context_menu.add_command(label="删除", command=self._delete_selected)
-        self.trade_tree.bind("<Button-1>", self._clear_selection_on_blank)
-        self.trade_tree.bind("<Button-3>", self._show_context_menu)
 
         ttk.Label(
             outer,
@@ -653,7 +697,8 @@ class StockTradeWindow(tk.Toplevel):
         _center_and_show(self, owner, fit_content=False)
 
     def _reload_records(self) -> None:
-        self.trade_tree.delete(*self.trade_tree.get_children(""))
+        for tree in self.trade_trees.values():
+            tree.delete(*tree.get_children(""))
         for index, record in enumerate(
             self.owner.trades.get(self.symbol.canonical, [])
         ):
@@ -661,20 +706,23 @@ class StockTradeWindow(tk.Toplevel):
                 self.symbol,
                 record,
             )
-            self.trade_tree.insert(
-                "",
-                tk.END,
-                iid=f"trade-{index}",
-                values=(
-                    record.trade_date,
-                    record.trade_type,
-                    f"{record.price} {self.currency}",
-                    record.quantity,
-                    profit,
-                    return_rate,
-                ),
-                tags=self._trade_row_tags(record),
-            )
+            cell_values = {
+                "trade_date": record.trade_date,
+                "trade_type": record.trade_type,
+                "price": f"{record.price} {self.currency}",
+                "quantity": record.quantity,
+                "profit": profit,
+                "return": return_rate,
+            }
+            for column, tree in self.trade_trees.items():
+                value = cell_values[column]
+                tree.insert(
+                    "",
+                    tk.END,
+                    iid=f"trade-{index}",
+                    values=(value,),
+                    tags=self._trade_cell_tags(column, record, value),
+                )
         self.refresh_summary()
 
     def refresh_summary(self) -> None:
@@ -693,25 +741,44 @@ class StockTradeWindow(tk.Toplevel):
         records = self.owner.trades.get(self.symbol.canonical, [])
         for index, record in enumerate(records):
             item_id = f"trade-{index}"
-            if not self.trade_tree.exists(item_id):
+            if not all(
+                tree.exists(item_id) for tree in self.trade_trees.values()
+            ):
                 continue
-            values = list(self.trade_tree.item(item_id, "values"))
-            if len(values) != 6:
-                continue
-            values[4], values[5] = self.owner._calculate_trade_performance(
+            profit, return_rate = self.owner._calculate_trade_performance(
                 self.symbol,
                 record,
             )
-            self.trade_tree.item(
-                item_id,
-                values=values,
-                tags=self._trade_row_tags(record),
-            )
+            for column, tree in self.trade_trees.items():
+                current_values = tree.item(item_id, "values")
+                value = str(current_values[0]) if current_values else ""
+                if column == "profit":
+                    value = profit
+                elif column == "return":
+                    value = return_rate
+                tree.item(
+                    item_id,
+                    values=(value,),
+                    tags=self._trade_cell_tags(column, record, value),
+                )
         if self._sort_column is not None:
             self._sort_records(self._sort_column, self._sort_descending)
 
-    def _trade_row_tags(self, record: TradeRecord) -> tuple[str, ...]:
-        tags = ["buy" if record.trade_type == "买入" else "sell"]
+    def _trade_cell_tags(
+        self,
+        column: str,
+        record: TradeRecord,
+        value: str,
+    ) -> tuple[str, ...]:
+        tags: list[str] = []
+        if column == "trade_type":
+            tags.append("buy" if record.trade_type == "买入" else "sell")
+        elif column in {"profit", "return"}:
+            color = self._metric_color(value)
+            if color == BUY_COLOR:
+                tags.append("positive")
+            elif color == SELL_COLOR:
+                tags.append("negative")
         if self.owner._trade_return_exceeds_threshold(self.symbol, record):
             tags.append("high_return")
         return tuple(tags)
@@ -752,7 +819,8 @@ class StockTradeWindow(tk.Toplevel):
         ordered_items = [item_id for item_id, _value in sortable_items]
         ordered_items.extend(missing_items)
         for position, item_id in enumerate(ordered_items):
-            self.trade_tree.move(item_id, "", position)
+            for tree in self.trade_trees.values():
+                tree.move(item_id, "", position)
 
         self._sort_column = column
         self._sort_descending = descending
@@ -760,34 +828,97 @@ class StockTradeWindow(tk.Toplevel):
             heading = TRADE_HEADINGS[heading_column]
             if heading_column == column:
                 heading += " ↓" if descending else " ↑"
-            self.trade_tree.heading(heading_column, text=heading)
-
-    def _column_at(self, x: int) -> str | None:
-        column_id = self.trade_tree.identify_column(x)
-        if not column_id.startswith("#"):
-            return None
-        try:
-            index = int(column_id[1:]) - 1
-        except ValueError:
-            return None
-        return TRADE_COLUMNS[index] if 0 <= index < len(TRADE_COLUMNS) else None
+            self.trade_trees[heading_column].heading(
+                heading_column,
+                text=heading,
+            )
 
     @staticmethod
     def _metric_color(value: str) -> str:
-        if value.startswith("+"):
+        match = re.match(r"^\s*([+-]?\d[\d,]*(?:\.\d+)?)", value)
+        if match is None:
+            return TEXT_PRIMARY
+        try:
+            number = Decimal(match.group(1).replace(",", ""))
+        except InvalidOperation:
+            return TEXT_PRIMARY
+        if number > 0:
             return BUY_COLOR
-        if value.startswith("-"):
+        if number < 0:
             return SELL_COLOR
-        return TEXT_SECONDARY
+        return TEXT_PRIMARY
+
+    def _scroll_trade_trees(self, *args: str) -> None:
+        self._syncing_trade_scroll = True
+        try:
+            for tree in self.trade_trees.values():
+                tree.yview(*args)
+        finally:
+            self._syncing_trade_scroll = False
+        first, last = self.trade_tree.yview()
+        self.trade_scrollbar.set(first, last)
+
+    def _sync_trade_scroll(
+        self,
+        source: ttk.Treeview,
+        first: str,
+        last: str,
+    ) -> None:
+        self.trade_scrollbar.set(first, last)
+        if self._syncing_trade_scroll:
+            return
+        self._syncing_trade_scroll = True
+        try:
+            for tree in self.trade_trees.values():
+                if tree is not source:
+                    tree.yview_moveto(first)
+        finally:
+            self._syncing_trade_scroll = False
+
+    def _sync_trade_selection(self, event: tk.Event) -> None:
+        source = event.widget
+        if not isinstance(source, ttk.Treeview) or self._syncing_trade_selection:
+            return
+        selected = source.selection()
+        self._syncing_trade_selection = True
+        try:
+            for tree in self.trade_trees.values():
+                if tree is source:
+                    continue
+                current = tree.selection()
+                if current:
+                    tree.selection_remove(*current)
+                if selected:
+                    tree.selection_set(selected[0])
+                    tree.focus(selected[0])
+        finally:
+            self._syncing_trade_selection = False
+
+    def _set_trade_selection(self, item_id: str) -> None:
+        self._syncing_trade_selection = True
+        try:
+            for tree in self.trade_trees.values():
+                tree.selection_set(item_id)
+                tree.focus(item_id)
+        finally:
+            self._syncing_trade_selection = False
 
     def _clear_selection_on_blank(self, event: tk.Event) -> None:
-        row_id = self.trade_tree.identify_row(event.y)
-        region = self.trade_tree.identify_region(event.x, event.y)
+        tree = event.widget
+        if not isinstance(tree, ttk.Treeview):
+            return
+        row_id = tree.identify_row(event.y)
+        region = tree.identify_region(event.x, event.y)
         if not row_id and region not in {"heading", "separator"}:
-            selected_items = self.trade_tree.selection()
-            if selected_items:
-                self.trade_tree.selection_remove(*selected_items)
-            self.trade_tree.focus("")
+            self._syncing_trade_selection = True
+            try:
+                for trade_tree in self.trade_trees.values():
+                    selected_items = trade_tree.selection()
+                    if selected_items:
+                        trade_tree.selection_remove(*selected_items)
+                    trade_tree.focus("")
+            finally:
+                self._syncing_trade_selection = False
 
     def _open_entry_dialog(self) -> None:
         TradeEntryDialog(self, self.currency, self._save_record)
@@ -814,19 +945,24 @@ class StockTradeWindow(tk.Toplevel):
         records = self.owner.trades.get(self.symbol.canonical, [])
         return index if 0 <= index < len(records) else None
 
-    def _show_context_menu(self, event: tk.Event) -> str | None:
-        if self.trade_tree.identify_region(event.x, event.y) == "heading":
-            column = self._column_at(event.x)
+    def _show_context_menu(
+        self,
+        event: tk.Event,
+        column: str,
+    ) -> str | None:
+        tree = event.widget
+        if not isinstance(tree, ttk.Treeview):
+            return None
+        if tree.identify_region(event.x, event.y) == "heading":
             if column in SORTABLE_TRADE_COLUMNS:
                 self._sort_records(column, descending=True)
                 return "break"
             return None
 
-        item_id = self.trade_tree.identify_row(event.y)
+        item_id = tree.identify_row(event.y)
         if not item_id:
             return None
-        self.trade_tree.selection_set(item_id)
-        self.trade_tree.focus(item_id)
+        self._set_trade_selection(item_id)
         try:
             self.context_menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -854,7 +990,7 @@ class StockTradeWindow(tk.Toplevel):
             )
             return False
         self._reload_records()
-        self.trade_tree.selection_set(f"trade-{index}")
+        self._set_trade_selection(f"trade-{index}")
         return True
 
     def _delete_selected(self) -> None:
