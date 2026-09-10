@@ -1445,7 +1445,7 @@ class StockPriceApp(tk.Tk):
             page.columnconfigure(0, weight=1)
 
         self.market_summary_var = tk.StringVar(
-            value="美股总盈亏：--    总收益率：--"
+            value="美股总市值：--    总盈亏：--    总收益率：--"
         )
         self.market_summary_label = ttk.Label(
             self.table_frame,
@@ -1549,9 +1549,12 @@ class StockPriceApp(tk.Tk):
 
     def _refresh_market_summary(self) -> None:
         market = self._active_market()
-        profit, return_rate = self._calculate_market_metrics(market)
+        market_value, profit, return_rate = self._calculate_market_metrics(
+            market
+        )
         self.market_summary_var.set(
-            f"{MARKET_TITLES[market]}总盈亏：{profit}    "
+            f"{MARKET_TITLES[market]}总市值：{market_value}    "
+            f"总盈亏：{profit}    "
             f"总收益率：{return_rate}"
         )
         self.market_summary_label.lift()
@@ -2457,8 +2460,12 @@ class StockPriceApp(tk.Tk):
         self._save_state()
         self.status_var.set(f"列表中共有 {len(self.symbols)} 只股票。")
 
-    def _calculate_market_metrics(self, market: str) -> tuple[str, str]:
+    def _calculate_market_metrics(
+        self,
+        market: str,
+    ) -> tuple[str, str, str]:
         currency = "USD" if market == "US" else "HKD"
+        total_market_value = Decimal("0")
         total_buy_cost = Decimal("0")
         total_profit = Decimal("0")
         has_records = False
@@ -2474,7 +2481,7 @@ class StockPriceApp(tk.Tk):
 
                 current_quote = self.current_prices.get(symbol.canonical)
                 if current_quote is None or current_quote[1] != currency:
-                    return "--", "--"
+                    return "--", "--", "--"
 
                 buy_cost = Decimal("0")
                 sell_proceeds = Decimal("0")
@@ -2491,6 +2498,7 @@ class StockPriceApp(tk.Tk):
                         net_quantity -= quantity
 
                 current_price = current_quote[0]
+                total_market_value += current_price * net_quantity
                 total_buy_cost += buy_cost
                 total_profit += (
                     current_price * net_quantity
@@ -2498,18 +2506,19 @@ class StockPriceApp(tk.Tk):
                     - buy_cost
                 )
         except InvalidOperation:
-            return "--", "--"
+            return "--", "--", "--"
 
         if not has_records:
-            return "--", "--"
+            return "--", "--", "--"
 
+        market_value_text = f"{total_market_value:,.2f} {currency}"
         profit_text = f"{total_profit:+,.2f} {currency}"
         return_text = (
             "--"
             if total_buy_cost <= 0
             else f"{total_profit / total_buy_cost * Decimal('100'):+.2f}%"
         )
-        return profit_text, return_text
+        return market_value_text, profit_text, return_text
 
     def _calculate_position_metrics(
         self,
