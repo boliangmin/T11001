@@ -66,8 +66,8 @@ DEFAULT_COLUMN_WIDTHS = {
 APP_BACKGROUND = "#F4F7FB"
 SURFACE = "#FFFFFF"
 SURFACE_MUTED = "#EAF0F8"
-TEXT_PRIMARY = "#172033"
-TEXT_SECONDARY = "#667085"
+TEXT_PRIMARY = "#000000"
+TEXT_SECONDARY = TEXT_PRIMARY
 ACCENT = "#2563EB"
 ACCENT_HOVER = "#1D4ED8"
 ACCENT_SOFT = "#DBEAFE"
@@ -108,6 +108,21 @@ def _default_state_path() -> Path:
 
 def _contains_chinese(value: str) -> bool:
     return any("\u3400" <= character <= "\u9fff" for character in value)
+
+
+def _metric_color(value: str) -> str:
+    match = re.match(r"^\s*([+-]?\d[\d,]*(?:\.\d+)?)", value)
+    if match is None:
+        return TEXT_PRIMARY
+    try:
+        number = Decimal(match.group(1).replace(",", ""))
+    except InvalidOperation:
+        return TEXT_PRIMARY
+    if number > 0:
+        return BUY_COLOR
+    if number < 0:
+        return SELL_COLOR
+    return TEXT_PRIMARY
 
 
 def _center_and_show(
@@ -699,12 +714,8 @@ class StockTradeWindow(tk.Toplevel):
         self.holding_summary_var.set(holding_count)
         self.profit_summary_var.set(profit)
         self.return_summary_var.set(return_rate)
-        self.profit_summary_label.configure(
-            foreground=self._metric_color(profit)
-        )
-        self.return_summary_label.configure(
-            foreground=self._metric_color(return_rate)
-        )
+        self.profit_summary_label.configure(foreground=TEXT_PRIMARY)
+        self.return_summary_label.configure(foreground=TEXT_PRIMARY)
         records = self.owner.trades.get(self.symbol.canonical, [])
         for index, record in enumerate(records):
             item_id = f"trade-{index}"
@@ -791,18 +802,7 @@ class StockTradeWindow(tk.Toplevel):
 
     @staticmethod
     def _metric_color(value: str) -> str:
-        match = re.match(r"^\s*([+-]?\d[\d,]*(?:\.\d+)?)", value)
-        if match is None:
-            return TEXT_PRIMARY
-        try:
-            number = Decimal(match.group(1).replace(",", ""))
-        except InvalidOperation:
-            return TEXT_PRIMARY
-        if number > 0:
-            return BUY_COLOR
-        if number < 0:
-            return SELL_COLOR
-        return TEXT_PRIMARY
+        return _metric_color(value)
 
     def _scroll_trade_tree(self, *args: str) -> None:
         self.trade_tree.yview(*args)
@@ -835,7 +835,7 @@ class StockTradeWindow(tk.Toplevel):
 
         visible_labels: set[tuple[str, str]] = set()
         selected_items = set(self.trade_tree.selection())
-        target_columns = ("trade_type", "profit", "return")
+        target_columns = ("profit", "return")
         for item_id in self.trade_tree.get_children(""):
             item_tags = set(self.trade_tree.item(item_id, "tags"))
             background = (
@@ -853,13 +853,8 @@ class StockTradeWindow(tk.Toplevel):
                 key = (item_id, column)
                 visible_labels.add(key)
                 value = self.trade_tree.set(item_id, column)
-                foreground = TEXT_PRIMARY
+                foreground = self._metric_color(value)
                 font = ("Microsoft YaHei UI", 10)
-                if column == "trade_type":
-                    foreground = BUY_COLOR if value == "买入" else SELL_COLOR
-                    font = ("Microsoft YaHei UI", 10, "bold")
-                else:
-                    foreground = self._metric_color(value)
 
                 label = self._trade_cell_labels.get(key)
                 if label is None:
@@ -1068,6 +1063,10 @@ class StockPriceApp(tk.Tk):
         self._trade_windows: dict[str, StockTradeWindow] = {}
         self.trees: dict[str, ttk.Treeview] = {}
         self.market_pages: dict[str, ttk.Frame] = {}
+        self._market_cell_labels: dict[
+            tuple[str, str], tk.Label
+        ] = {}
+        self._market_overlay_after_id: str | None = None
         self._swipe_start: tuple[ttk.Treeview, int, int] | None = None
         self._column_resize_tree: ttk.Treeview | None = None
         self._profit_return_resize_start: (
@@ -1087,6 +1086,7 @@ class StockPriceApp(tk.Tk):
         self._configure_style()
         self._build_ui()
         self._restore_state()
+        self._schedule_market_cell_labels()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         _center_and_show(self, fit_content=False)
         self._queue_after_id = self.after(100, self._process_result_queue)
@@ -1125,7 +1125,7 @@ class StockPriceApp(tk.Tk):
         style.configure(
             "Weekend.TLabel",
             background=APP_BACKGROUND,
-            foreground=BUY_COLOR,
+            foreground=TEXT_PRIMARY,
         )
         style.configure(
             "TEntry",
@@ -1188,7 +1188,7 @@ class StockPriceApp(tk.Tk):
         style.configure(
             "Primary.TButton",
             background=ACCENT,
-            foreground=SURFACE,
+            foreground=TEXT_PRIMARY,
             bordercolor=ACCENT,
             lightcolor=ACCENT,
             darkcolor=ACCENT,
@@ -1201,12 +1201,12 @@ class StockPriceApp(tk.Tk):
                 ("pressed", "#1E40AF"),
                 ("active", ACCENT_HOVER),
             ],
-            foreground=[("disabled", "#F8FAFC"), ("active", SURFACE)],
+            foreground=[("disabled", TEXT_PRIMARY), ("active", TEXT_PRIMARY)],
         )
         style.configure(
             "Action.TButton",
             background=SURFACE,
-            foreground=ACCENT,
+            foreground=TEXT_PRIMARY,
             bordercolor=ACCENT,
             lightcolor=ACCENT,
             darkcolor=ACCENT,
@@ -1215,7 +1215,7 @@ class StockPriceApp(tk.Tk):
         style.map(
             "Action.TButton",
             background=[("active", ACCENT_SOFT), ("pressed", "#BFDBFE")],
-            foreground=[("disabled", "#98A2B3"), ("active", ACCENT_HOVER)],
+            foreground=[("disabled", TEXT_PRIMARY), ("active", TEXT_PRIMARY)],
         )
         style.configure(
             "TRadiobutton",
@@ -1223,8 +1223,8 @@ class StockPriceApp(tk.Tk):
             foreground=TEXT_PRIMARY,
             padding=(0, 3),
         )
-        style.configure("Buy.TRadiobutton", foreground=BUY_COLOR)
-        style.configure("Sell.TRadiobutton", foreground=SELL_COLOR)
+        style.configure("Buy.TRadiobutton", foreground=TEXT_PRIMARY)
+        style.configure("Sell.TRadiobutton", foreground=TEXT_PRIMARY)
         style.map(
             "TRadiobutton",
             background=[("active", APP_BACKGROUND)],
@@ -1248,7 +1248,7 @@ class StockPriceApp(tk.Tk):
         style.map(
             "TNotebook.Tab",
             background=[("selected", ACCENT), ("active", ACCENT_SOFT)],
-            foreground=[("selected", SURFACE), ("active", TEXT_PRIMARY)],
+            foreground=[("selected", TEXT_PRIMARY), ("active", TEXT_PRIMARY)],
             font=[
                 ("selected", ("Microsoft YaHei UI", 12, "bold")),
                 ("!selected", ("Microsoft YaHei UI", 10)),
@@ -1293,13 +1293,13 @@ class StockPriceApp(tk.Tk):
             bordercolor=APP_BACKGROUND,
             lightcolor="#C3D1E4",
             darkcolor="#C3D1E4",
-            arrowcolor=TEXT_SECONDARY,
+            arrowcolor=TEXT_PRIMARY,
         )
         style.map("TScrollbar", background=[("active", ACCENT)])
         style.configure(
             "SelectedDay.TButton",
             background=ACCENT,
-            foreground=SURFACE,
+            foreground=TEXT_PRIMARY,
             bordercolor=ACCENT,
             lightcolor=ACCENT,
             darkcolor=ACCENT,
@@ -1308,7 +1308,7 @@ class StockPriceApp(tk.Tk):
         style.map(
             "SelectedDay.TButton",
             background=[("active", ACCENT_HOVER), ("pressed", "#1E40AF")],
-            foreground=[("active", SURFACE)],
+            foreground=[("active", TEXT_PRIMARY)],
         )
 
     def _build_ui(self) -> None:
@@ -1400,24 +1400,53 @@ class StockPriceApp(tk.Tk):
                     stretch=column in {"name", "profit"},
                 )
 
-            tree.tag_configure("up", foreground=BUY_COLOR)
-            tree.tag_configure("down", foreground=SELL_COLOR)
-            tree.tag_configure("waiting", foreground=TEXT_SECONDARY)
+            tree.tag_configure("up", foreground=TEXT_PRIMARY)
+            tree.tag_configure("down", foreground=TEXT_PRIMARY)
+            tree.tag_configure("waiting", foreground=TEXT_PRIMARY)
             tree.bind("<Button-1>", self._clear_selection_on_blank)
             tree.bind("<ButtonPress-1>", self._begin_market_swipe, add="+")
             tree.bind("<B1-Motion>", self._resize_profit_and_return, add="+")
             tree.bind("<ButtonRelease-1>", self._finish_market_swipe, add="+")
+            tree.bind(
+                "<<TreeviewSelect>>",
+                self._schedule_market_cell_labels,
+            )
+            tree.bind(
+                "<Configure>",
+                self._schedule_market_cell_labels,
+                add="+",
+            )
+            tree.bind(
+                "<ButtonRelease-1>",
+                self._schedule_market_cell_labels,
+                add="+",
+            )
             tree.bind("<Shift-MouseWheel>", self._switch_market_with_wheel)
             tree.bind("<Double-1>", self._open_stock_trade_window)
             tree.bind("<Delete>", self.remove_selected)
 
-            vertical = ttk.Scrollbar(page, orient=tk.VERTICAL, command=tree.yview)
-            tree.configure(yscrollcommand=vertical.set)
+            vertical = ttk.Scrollbar(page, orient=tk.VERTICAL)
+            vertical.configure(
+                command=lambda *args, target=tree: self._scroll_market_tree(
+                    target,
+                    *args,
+                )
+            )
+            tree.configure(
+                yscrollcommand=lambda first, last, target=tree, bar=vertical: (
+                    self._on_market_tree_scroll(target, bar, first, last)
+                )
+            )
 
             tree.grid(row=0, column=0, sticky="nsew")
             vertical.grid(row=0, column=1, sticky="ns")
             page.rowconfigure(0, weight=1)
             page.columnconfigure(0, weight=1)
+
+        self.table_frame.bind(
+            "<<NotebookTabChanged>>",
+            self._schedule_market_cell_labels,
+        )
 
         footer = ttk.Frame(outer)
         footer.pack(fill=tk.X, pady=(10, 0))
@@ -1509,6 +1538,7 @@ class StockPriceApp(tk.Tk):
             for column, width in widths.items():
                 if column in tree["columns"]:
                     tree.column(column, width=width)
+        self._schedule_market_cell_labels()
 
     def _refresh_restored_stocks(self, symbols: list[StockSymbol]) -> None:
         self._startup_refresh_after_id = None
@@ -1770,6 +1800,9 @@ class StockPriceApp(tk.Tk):
         if self._startup_refresh_after_id is not None:
             self.after_cancel(self._startup_refresh_after_id)
             self._startup_refresh_after_id = None
+        if self._market_overlay_after_id is not None:
+            self.after_cancel(self._market_overlay_after_id)
+            self._market_overlay_after_id = None
         self._save_state()
         self._release_state_lock()
         self.destroy()
@@ -1995,6 +2028,199 @@ class StockPriceApp(tk.Tk):
             if selected_items:
                 tree.selection_remove(*selected_items)
             tree.focus("")
+            self._schedule_market_cell_labels()
+
+    def _schedule_market_cell_labels(
+        self,
+        _event: tk.Event | None = None,
+    ) -> None:
+        if self._market_overlay_after_id is not None:
+            return
+        try:
+            self._market_overlay_after_id = self.after_idle(
+                self._render_market_cell_labels
+            )
+        except tk.TclError:
+            self._market_overlay_after_id = None
+
+    def _render_market_cell_labels(self) -> None:
+        self._market_overlay_after_id = None
+        visible_labels: set[tuple[str, str]] = set()
+        for tree in self.trees.values():
+            try:
+                if not tree.winfo_exists():
+                    continue
+            except tk.TclError:
+                continue
+
+            selected_items = set(tree.selection())
+            for item_id in tree.get_children(""):
+                background = (
+                    ACCENT_SOFT if item_id in selected_items else SURFACE
+                )
+                for column in ("change", "profit", "return"):
+                    bounds = tree.bbox(item_id, column)
+                    if not bounds:
+                        continue
+                    x, y, width, height = bounds
+                    key = (item_id, column)
+                    visible_labels.add(key)
+                    value = tree.set(item_id, column)
+                    label = self._market_cell_labels.get(key)
+                    if label is None:
+                        label = tk.Label(
+                            tree,
+                            borderwidth=0,
+                            highlightthickness=0,
+                            anchor=tk.CENTER,
+                            padx=0,
+                            pady=0,
+                            takefocus=False,
+                        )
+                        label.bind(
+                            "<ButtonPress-1>",
+                            lambda event, target=tree, selected=item_id: (
+                                self._begin_market_overlay_swipe(
+                                    event,
+                                    target,
+                                    selected,
+                                )
+                            ),
+                        )
+                        label.bind(
+                            "<ButtonRelease-1>",
+                            lambda event, target=tree: (
+                                self._finish_market_overlay_swipe(event, target)
+                            ),
+                        )
+                        label.bind(
+                            "<Double-1>",
+                            lambda _event, selected=item_id: (
+                                self._open_stock_trade_from_overlay(selected)
+                            ),
+                        )
+                        label.bind(
+                            "<MouseWheel>",
+                            lambda event, target=tree: (
+                                self._scroll_market_from_overlay(event, target)
+                            ),
+                        )
+                        label.bind(
+                            "<Shift-MouseWheel>",
+                            self._switch_market_with_wheel,
+                        )
+                        self._market_cell_labels[key] = label
+                    label.configure(
+                        text=value,
+                        foreground=_metric_color(value),
+                        background=background,
+                        font=("Microsoft YaHei UI", 10),
+                    )
+                    label.place(
+                        x=x + 1,
+                        y=y,
+                        width=max(1, width - 2),
+                        height=height,
+                    )
+                    label.lift()
+
+        for key, label in list(self._market_cell_labels.items()):
+            if key in visible_labels:
+                continue
+            label.place_forget()
+            if not any(tree.exists(key[0]) for tree in self.trees.values()):
+                label.destroy()
+                self._market_cell_labels.pop(key, None)
+
+    def _begin_market_overlay_swipe(
+        self,
+        event: tk.Event,
+        tree: ttk.Treeview,
+        item_id: str,
+    ) -> str:
+        selected_items = set(tree.selection())
+        if event.state & 0x0004:
+            if item_id in selected_items:
+                tree.selection_remove(item_id)
+            else:
+                tree.selection_add(item_id)
+        elif event.state & 0x0001 and tree.focus() in tree.get_children(""):
+            children = list(tree.get_children(""))
+            start = children.index(tree.focus())
+            end = children.index(item_id)
+            tree.selection_set(children[min(start, end) : max(start, end) + 1])
+        else:
+            tree.selection_set(item_id)
+        tree.focus(item_id)
+        tree.focus_set()
+        self._column_resize_tree = None
+        self._profit_return_resize_start = None
+        self._swipe_start = (
+            tree,
+            event.x_root - tree.winfo_rootx(),
+            event.y_root - tree.winfo_rooty(),
+        )
+        self._schedule_market_cell_labels()
+        return "break"
+
+    def _finish_market_overlay_swipe(
+        self,
+        event: tk.Event,
+        tree: ttk.Treeview,
+    ) -> str:
+        swipe_start = self._swipe_start
+        self._swipe_start = None
+        if swipe_start is not None and swipe_start[0] is tree:
+            current_x = event.x_root - tree.winfo_rootx()
+            current_y = event.y_root - tree.winfo_rooty()
+            horizontal_distance = current_x - swipe_start[1]
+            vertical_distance = current_y - swipe_start[2]
+            if (
+                abs(horizontal_distance) >= 80
+                and abs(horizontal_distance) > abs(vertical_distance) * 1.5
+            ):
+                self._switch_market_page(
+                    1 if horizontal_distance < 0 else -1
+                )
+        self._schedule_market_cell_labels()
+        return "break"
+
+    def _open_stock_trade_from_overlay(self, item_id: str) -> str:
+        symbol = self.symbols.get(item_id)
+        if symbol is not None:
+            self._show_stock_trade_window(symbol)
+        return "break"
+
+    def _scroll_market_tree(
+        self,
+        tree: ttk.Treeview,
+        *args: str,
+    ) -> None:
+        tree.yview(*args)
+        self._schedule_market_cell_labels()
+
+    def _on_market_tree_scroll(
+        self,
+        _tree: ttk.Treeview,
+        scrollbar: ttk.Scrollbar,
+        first: str,
+        last: str,
+    ) -> None:
+        scrollbar.set(first, last)
+        self._schedule_market_cell_labels()
+
+    def _scroll_market_from_overlay(
+        self,
+        event: tk.Event,
+        tree: ttk.Treeview,
+    ) -> str:
+        if event.delta:
+            steps = -int(event.delta / 120)
+            if steps == 0:
+                steps = -1 if event.delta > 0 else 1
+            tree.yview_scroll(steps, "units")
+            self._schedule_market_cell_labels()
+        return "break"
 
     def _begin_market_swipe(self, event: tk.Event) -> str | None:
         tree = event.widget
@@ -2034,6 +2260,7 @@ class StockPriceApp(tk.Tk):
         )
         tree.column("profit", width=start_profit_width + delta)
         tree.column("return", width=start_return_width - delta)
+        self._schedule_market_cell_labels()
         return "break"
 
     def _finish_market_swipe(self, event: tk.Event) -> str | None:
@@ -2080,6 +2307,7 @@ class StockPriceApp(tk.Tk):
                 continue
             for column, width in widths.items():
                 tree.column(column, width=width)
+        self._schedule_market_cell_labels()
         self._save_state()
 
     def _switch_market_with_wheel(self, event: tk.Event) -> str:
@@ -2191,6 +2419,7 @@ class StockPriceApp(tk.Tk):
             self.symbols.pop(item_id, None)
             self.display_names.pop(item_id, None)
             self.current_prices.pop(item_id, None)
+        self._schedule_market_cell_labels()
         self._save_state()
         self.status_var.set(f"列表中共有 {len(self.symbols)} 只股票。")
 
@@ -2306,6 +2535,7 @@ class StockPriceApp(tk.Tk):
             self._calculate_position_metrics(symbol)
         )
         tree.item(symbol.canonical, values=current)
+        self._schedule_market_cell_labels()
         trade_window = self._trade_windows.get(symbol.canonical)
         if trade_window is not None and trade_window.winfo_exists():
             trade_window.refresh_summary()
@@ -2433,6 +2663,7 @@ class StockPriceApp(tk.Tk):
             ),
             tags=(tag,) if tag else (),
         )
+        self._schedule_market_cell_labels()
         trade_window = self._trade_windows.get(symbol.canonical)
         if trade_window is not None and trade_window.winfo_exists():
             trade_window.refresh_summary()
@@ -2445,6 +2676,7 @@ class StockPriceApp(tk.Tk):
         current = list(tree.item(symbol.canonical, "values"))
         if len(current) == len(TABLE_COLUMNS) and current[2] == "--":
             tree.item(symbol.canonical, values=current, tags=("waiting",))
+        self._schedule_market_cell_labels()
         self._save_state()
         self.status_var.set(f"{symbol.canonical} 行情获取失败：{error[:100]}")
 
