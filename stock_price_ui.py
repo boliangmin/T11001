@@ -2460,6 +2460,40 @@ class StockPriceApp(tk.Tk):
         self._save_state()
         self.status_var.set(f"列表中共有 {len(self.symbols)} 只股票。")
 
+    def _net_holding_quantity(self, symbol: StockSymbol) -> Decimal:
+        net_quantity = Decimal("0")
+        try:
+            for record in self.trades.get(symbol.canonical, []):
+                quantity = Decimal(record.quantity)
+                if record.trade_type == "买入":
+                    net_quantity += quantity
+                elif record.trade_type == "卖出":
+                    net_quantity -= quantity
+        except InvalidOperation:
+            return Decimal("0")
+        return net_quantity
+
+    def _reorder_market_rows(self, market: str) -> None:
+        tree = self.trees.get(market)
+        if tree is None:
+            return
+
+        item_ids = list(tree.get_children(""))
+        ordered_ids = sorted(
+            item_ids,
+            key=lambda item_id: (
+                0
+                if (
+                    (symbol := self.symbols.get(item_id)) is not None
+                    and self._net_holding_quantity(symbol) != 0
+                )
+                else 1
+            ),
+        )
+        for position, item_id in enumerate(ordered_ids):
+            tree.move(item_id, "", position)
+        self._schedule_market_cell_labels()
+
     def _calculate_market_metrics(
         self,
         market: str,
@@ -2632,7 +2666,7 @@ class StockPriceApp(tk.Tk):
             self._calculate_position_metrics(symbol)
         )
         tree.item(symbol.canonical, values=current)
-        self._schedule_market_cell_labels()
+        self._reorder_market_rows(symbol.market)
         self._refresh_market_summary()
         trade_window = self._trade_windows.get(symbol.canonical)
         if trade_window is not None and trade_window.winfo_exists():
