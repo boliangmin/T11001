@@ -1086,6 +1086,7 @@ class StockPriceApp(tk.Tk):
         self._configure_style()
         self._build_ui()
         self._restore_state()
+        self._refresh_market_summary()
         self._schedule_market_cell_labels()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         _center_and_show(self, fit_content=False)
@@ -1443,9 +1444,24 @@ class StockPriceApp(tk.Tk):
             page.rowconfigure(0, weight=1)
             page.columnconfigure(0, weight=1)
 
+        self.market_summary_var = tk.StringVar(
+            value="美股总盈亏：--    总收益率：--"
+        )
+        self.market_summary_label = ttk.Label(
+            self.table_frame,
+            textvariable=self.market_summary_var,
+            font=("Microsoft YaHei UI", 11, "bold"),
+        )
+        self.market_summary_label.place(
+            x=180,
+            y=22,
+            anchor=tk.W,
+        )
+        self.market_summary_label.lift()
+
         self.table_frame.bind(
             "<<NotebookTabChanged>>",
-            self._schedule_market_cell_labels,
+            self._on_market_tab_changed,
         )
 
         footer = ttk.Frame(outer)
@@ -1522,6 +1538,23 @@ class StockPriceApp(tk.Tk):
         page = self.market_pages.get(market)
         if page is not None:
             self.table_frame.select(page)
+            self._refresh_market_summary()
+
+    def _on_market_tab_changed(
+        self,
+        _event: tk.Event | None = None,
+    ) -> None:
+        self._refresh_market_summary()
+        self._schedule_market_cell_labels()
+
+    def _refresh_market_summary(self) -> None:
+        market = self._active_market()
+        profit, return_rate = self._calculate_market_metrics(market)
+        self.market_summary_var.set(
+            f"{MARKET_TITLES[market]}总盈亏：{profit}    "
+            f"总收益率：{return_rate}"
+        )
+        self.market_summary_label.lift()
 
     def _tree_for_symbol(self, symbol: StockSymbol) -> ttk.Treeview:
         return self.trees[symbol.market]
@@ -2420,8 +2453,63 @@ class StockPriceApp(tk.Tk):
             self.display_names.pop(item_id, None)
             self.current_prices.pop(item_id, None)
         self._schedule_market_cell_labels()
+        self._refresh_market_summary()
         self._save_state()
         self.status_var.set(f"列表中共有 {len(self.symbols)} 只股票。")
+
+    def _calculate_market_metrics(self, market: str) -> tuple[str, str]:
+        currency = "USD" if market == "US" else "HKD"
+        total_buy_cost = Decimal("0")
+        total_profit = Decimal("0")
+        has_records = False
+
+        try:
+            for symbol in self.symbols.values():
+                if symbol.market != market:
+                    continue
+                records = self.trades.get(symbol.canonical, [])
+                if not records:
+                    continue
+                has_records = True
+
+                current_quote = self.current_prices.get(symbol.canonical)
+                if current_quote is None or current_quote[1] != currency:
+                    return "--", "--"
+
+                buy_cost = Decimal("0")
+                sell_proceeds = Decimal("0")
+                net_quantity = Decimal("0")
+                for record in records:
+                    price = Decimal(record.price)
+                    quantity = Decimal(record.quantity)
+                    amount = price * quantity
+                    if record.trade_type == "买入":
+                        buy_cost += amount
+                        net_quantity += quantity
+                    elif record.trade_type == "卖出":
+                        sell_proceeds += amount
+                        net_quantity -= quantity
+
+                current_price = current_quote[0]
+                total_buy_cost += buy_cost
+                total_profit += (
+                    current_price * net_quantity
+                    + sell_proceeds
+                    - buy_cost
+                )
+        except InvalidOperation:
+            return "--", "--"
+
+        if not has_records:
+            return "--", "--"
+
+        profit_text = f"{total_profit:+,.2f} {currency}"
+        return_text = (
+            "--"
+            if total_buy_cost <= 0
+            else f"{total_profit / total_buy_cost * Decimal('100'):+.2f}%"
+        )
+        return profit_text, return_text
 
     def _calculate_position_metrics(
         self,
@@ -2536,6 +2624,7 @@ class StockPriceApp(tk.Tk):
         )
         tree.item(symbol.canonical, values=current)
         self._schedule_market_cell_labels()
+        self._refresh_market_summary()
         trade_window = self._trade_windows.get(symbol.canonical)
         if trade_window is not None and trade_window.winfo_exists():
             trade_window.refresh_summary()
@@ -2664,6 +2753,7 @@ class StockPriceApp(tk.Tk):
             tags=(tag,) if tag else (),
         )
         self._schedule_market_cell_labels()
+        self._refresh_market_summary()
         trade_window = self._trade_windows.get(symbol.canonical)
         if trade_window is not None and trade_window.winfo_exists():
             trade_window.refresh_summary()
@@ -2677,6 +2767,7 @@ class StockPriceApp(tk.Tk):
         if len(current) == len(TABLE_COLUMNS) and current[2] == "--":
             tree.item(symbol.canonical, values=current, tags=("waiting",))
         self._schedule_market_cell_labels()
+        self._refresh_market_summary()
         self._save_state()
         self.status_var.set(f"{symbol.canonical} 行情获取失败：{error[:100]}")
 
