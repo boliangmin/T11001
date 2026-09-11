@@ -208,25 +208,11 @@ def _format_epoch_local(epoch: int, offset_seconds: int) -> tuple[str, datetime]
     return aware.strftime("%Y-%m-%d %H:%M:%S"), aware.replace(tzinfo=None)
 
 
-def _session_for_epoch(meta: dict[str, object], epoch: int) -> str:
-    periods = meta.get("currentTradingPeriod")
-    if not isinstance(periods, dict):
-        return "未知"
-    labels = {"pre": "盘前", "regular": "正常交易", "post": "盘后"}
-    for key, label in labels.items():
-        period = periods.get(key)
-        if not isinstance(period, dict):
-            continue
-        start = period.get("start")
-        end = period.get("end")
-        if isinstance(start, int) and isinstance(end, int) and start <= epoch <= end:
-            return label
-    return "最近交易时段"
-
-
 def fetch_yahoo(symbol: StockSymbol, timeout: float) -> PriceQuote:
     encoded = url_quote(symbol.yahoo, safe="-.^")
-    query = "interval=1m&range=1d&includePrePost=true&events=div%2Csplits"
+    # 只请求正常交易时段数据。开盘时返回正常盘最新价，闭市时保持最近
+    # 一个交易日的正常盘收盘价，不让盘前或盘后成交覆盖界面价格。
+    query = "interval=1m&range=1d&includePrePost=false&events=div%2Csplits"
     errors: list[str] = []
     result: dict[str, object] | None = None
 
@@ -261,7 +247,7 @@ def fetch_yahoo(symbol: StockSymbol, timeout: float) -> PriceQuote:
     selected_price = regular_price
     selected_epoch = regular_epoch if isinstance(regular_epoch, int) else None
 
-    # 分钟线包含盘前、盘中和盘后；取最后一个非空值可获得更接近刷新时刻的价格。
+    # 分钟线已排除盘前和盘后；最后一个非空值只可能来自正常交易时段。
     timestamps = result.get("timestamp") or []
     indicators = result.get("indicators") or {}
     quote_groups = indicators.get("quote") or [] if isinstance(indicators, dict) else []
@@ -282,10 +268,9 @@ def fetch_yahoo(symbol: StockSymbol, timeout: float) -> PriceQuote:
     offset_seconds = int(offset) if isinstance(offset, (int, float)) else 0
     display_time: str | None = None
     sort_time: datetime | None = None
-    session = "最近交易时段"
+    session = "正常交易价"
     if selected_epoch is not None:
         display_time, sort_time = _format_epoch_local(selected_epoch, offset_seconds)
-        session = _session_for_epoch(meta, selected_epoch)
 
     previous_close = _to_float(meta.get("previousClose"))
     if previous_close is None:
@@ -368,7 +353,7 @@ def fetch_tencent(symbol: StockSymbol, timeout: float) -> PriceQuote:
         change_percent=percentage,
         bid=_to_float(fields[9]),
         ask=_to_float(fields[19]),
-        session="最新公开行情",
+        session="正常交易价" if symbol.market == "US" else "最新公开行情",
         fetched_at_utc=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         _sort_time=sort_time,
     )
@@ -438,26 +423,9 @@ def fetch_sina(symbol: StockSymbol, timeout: float) -> PriceQuote:
     price = regular_price
     display_time = regular_time
     sort_time = regular_sort
-    session = "正常交易"
+    session = "正常交易价"
     difference = _to_float(fields[4])
     percentage = _to_float(fields[2])
-
-    # 新浪美股数据若包含盘后价，字段 21/24 会比正常交易时段更新。
-    extended_price = _to_float(fields[21])
-    extended_time, extended_sort, extended_tz = _parse_sina_us_time(fields[24], year)
-    if (
-        extended_price is not None
-        and extended_price > 0
-        and extended_sort is not None
-        and (sort_time is None or extended_sort > sort_time)
-    ):
-        price = extended_price
-        display_time = extended_time
-        sort_time = extended_sort
-        tz_label = extended_tz
-        session = "盘前/盘后"
-        difference = _to_float(fields[22])
-        percentage = _to_float(fields[23])
 
     previous_close = _to_float(fields[26])
     if difference is None or percentage is None:
