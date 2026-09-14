@@ -1041,7 +1041,7 @@ class StockPriceApp(tk.Tk):
         super().__init__()
         self.withdraw()
         self.configure(background=APP_BACKGROUND)
-        self.title("我钱呢")
+        self.title("我钱呢｜公开行情可能延迟")
         self.geometry("1050x600")
         self.minsize(820, 430)
 
@@ -1464,17 +1464,7 @@ class StockPriceApp(tk.Tk):
             self._on_market_tab_changed,
         )
 
-        footer = ttk.Frame(outer)
-        footer.pack(fill=tk.X, pady=(10, 0))
         self.status_var = tk.StringVar(value="请输入股票名称或代码，并从候选项中选择。")
-        ttk.Label(footer, textvariable=self.status_var, style="Hint.TLabel").pack(
-            side=tk.LEFT, fill=tk.X, expand=True
-        )
-        ttk.Label(
-            footer,
-            text="公开行情可能延迟｜左右滑动切换市场｜Delete 可移除",
-            style="Hint.TLabel",
-        ).pack(side=tk.RIGHT)
 
         self.progress = ttk.Progressbar(outer, mode="indeterminate", length=160)
         self.code_entry.focus_set()
