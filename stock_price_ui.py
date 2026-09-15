@@ -1041,7 +1041,7 @@ class StockPriceApp(tk.Tk):
         super().__init__()
         self.withdraw()
         self.configure(background=APP_BACKGROUND)
-        self.title("我钱呢｜公开行情可能延迟")
+        self.title("我钱呢")
         self.geometry("1050x600")
         self.minsize(820, 430)
 
