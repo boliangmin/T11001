@@ -40,6 +40,7 @@ TABLE_COLUMNS = (
     "change",
     "holding",
     "cost",
+    "market_value",
     "profit",
     "return",
 )
@@ -50,6 +51,7 @@ TABLE_HEADINGS = {
     "change": "涨跌幅",
     "holding": "持仓数",
     "cost": "持仓成本",
+    "market_value": "总市值",
     "profit": "盈亏",
     "return": "收益率",
 }
@@ -60,6 +62,7 @@ DEFAULT_COLUMN_WIDTHS = {
     "change": 75,
     "holding": 80,
     "cost": 100,
+    "market_value": 120,
     "profit": 125,
     "return": 95,
 }
@@ -708,7 +711,7 @@ class StockTradeWindow(tk.Toplevel):
         self.refresh_summary()
 
     def refresh_summary(self) -> None:
-        holding_count, _, profit, return_rate = (
+        holding_count, _, _, profit, return_rate = (
             self.owner._calculate_position_metrics(self.symbol)
         )
         self.holding_summary_var.set(holding_count)
@@ -1610,11 +1613,11 @@ class StockPriceApp(tk.Tk):
                 legacy_columns = tuple(
                     column
                     for column in TABLE_COLUMNS
-                    if column not in {"holding", "cost"}
+                    if column not in {"holding", "cost", "market_value"}
                 )
                 missing_metric_columns = [
                     column
-                    for column in ("holding", "cost")
+                    for column in ("holding", "cost", "market_value")
                     if column not in saved_market_widths
                 ]
                 if (
@@ -1676,6 +1679,7 @@ class StockPriceApp(tk.Tk):
                         values=(
                             symbol.canonical,
                             display_name or "--",
+                            "--",
                             "--",
                             "--",
                             "--",
@@ -2020,6 +2024,7 @@ class StockPriceApp(tk.Tk):
             values=(
                 symbol.canonical,
                 selected_name or "--",
+                "--",
                 "--",
                 "--",
                 "--",
@@ -2547,11 +2552,11 @@ class StockPriceApp(tk.Tk):
     def _calculate_position_metrics(
         self,
         symbol: StockSymbol,
-    ) -> tuple[str, str, str, str]:
+    ) -> tuple[str, str, str, str, str]:
         current_quote = self.current_prices.get(symbol.canonical)
         records = self.trades.get(symbol.canonical, [])
         if not records:
-            return "--", "--", "--", "--"
+            return "--", "--", "--", "--", "--"
 
         currency = (
             current_quote[1] if current_quote is not None else symbol.default_currency
@@ -2570,7 +2575,7 @@ class StockPriceApp(tk.Tk):
                     sell_proceeds += amount
                     net_quantity -= quantity
         except InvalidOperation:
-            return "--", "--", "--", "--"
+            return "--", "--", "--", "--", "--"
 
         holding_count_text = f"{net_quantity:,.0f}"
         holding_cost_text = (
@@ -2579,9 +2584,10 @@ class StockPriceApp(tk.Tk):
             else f"{(buy_cost - sell_proceeds) / net_quantity:,.3f} {currency}"
         )
         if current_quote is None:
-            return holding_count_text, holding_cost_text, "--", "--"
+            return holding_count_text, holding_cost_text, "--", "--", "--"
 
         current_price, _currency = current_quote
+        market_value_text = f"{current_price * net_quantity:,.2f} {currency}"
         profit = current_price * net_quantity + sell_proceeds - buy_cost
         profit_text = f"{profit:+,.2f} {currency}"
         return_text = (
@@ -2589,10 +2595,16 @@ class StockPriceApp(tk.Tk):
             if buy_cost <= 0
             else f"{profit / buy_cost * Decimal('100'):+.2f}%"
         )
-        return holding_count_text, holding_cost_text, profit_text, return_text
+        return (
+            holding_count_text,
+            holding_cost_text,
+            market_value_text,
+            profit_text,
+            return_text,
+        )
 
     def _calculate_performance(self, symbol: StockSymbol) -> tuple[str, str]:
-        _, _, profit, return_rate = self._calculate_position_metrics(symbol)
+        _, _, _, profit, return_rate = self._calculate_position_metrics(symbol)
         return profit, return_rate
 
     def _calculate_trade_performance(
@@ -2652,7 +2664,7 @@ class StockPriceApp(tk.Tk):
         current = list(tree.item(symbol.canonical, "values"))
         if len(current) != len(TABLE_COLUMNS):
             return
-        current[4], current[5], current[6], current[7] = (
+        current[4], current[5], current[6], current[7], current[8] = (
             self._calculate_position_metrics(symbol)
         )
         tree.item(symbol.canonical, values=current)
@@ -2763,7 +2775,7 @@ class StockPriceApp(tk.Tk):
             Decimal(str(best.price)),
             best.currency,
         )
-        holding_count, holding_cost, profit, return_rate = (
+        holding_count, holding_cost, market_value, profit, return_rate = (
             self._calculate_position_metrics(symbol)
         )
 
@@ -2780,6 +2792,7 @@ class StockPriceApp(tk.Tk):
                 percentage,
                 holding_count,
                 holding_cost,
+                market_value,
                 profit,
                 return_rate,
             ),
