@@ -11,6 +11,7 @@ import queue
 import re
 import threading
 import tkinter as tk
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -86,6 +87,7 @@ TRADE_COLUMNS = (
     "quantity",
     "profit",
     "return",
+    "remark",
 )
 TRADE_HEADINGS = {
     "trade_date": "交易日期",
@@ -94,8 +96,10 @@ TRADE_HEADINGS = {
     "quantity": "交易份额",
     "profit": "盈亏",
     "return": "收益率",
+    "remark": "备注",
 }
 SORTABLE_TRADE_COLUMNS = {"trade_date", "profit", "return"}
+T_TRADE_ITEM_PREFIX = "t-trade-"
 STATE_VERSION = 4
 WINDOW_GEOMETRY_PATTERN = re.compile(
     r"^(?P<width>\d+)x(?P<height>\d+)(?P<x>[+-]\d+)(?P<y>[+-]\d+)$"
@@ -156,6 +160,21 @@ class TradeRecord:
     price: str
     quantity: str
     trade_type: str
+
+
+@dataclass(frozen=True)
+class TTradeGroup:
+    group_id: str
+    record_indices: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class TTradeSummary:
+    trade_date: str
+    realized_profit: Decimal
+    realized_return: Decimal
+    residual_record: TradeRecord | None
+    record_count: int
 
 
 class AlreadyRunningError(RuntimeError):
@@ -559,8 +578,8 @@ class StockTradeWindow(tk.Toplevel):
         self._trade_cell_labels: dict[tuple[str, str], tk.Label] = {}
         self._overlay_after_id: str | None = None
         self.title(f"交易记录 - {display_name or symbol.canonical}")
-        self.geometry("650x430")
-        self.minsize(520, 340)
+        self.geometry("880x430")
+        self.minsize(720, 340)
         self.transient(owner)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
@@ -611,7 +630,7 @@ class StockTradeWindow(tk.Toplevel):
             table_frame,
             columns=TRADE_COLUMNS,
             show="headings",
-            selectmode="browse",
+            selectmode="extended",
         )
         for column in TRADE_COLUMNS:
             heading_options: dict[str, object] = {
@@ -632,6 +651,7 @@ class StockTradeWindow(tk.Toplevel):
         self.trade_tree.column("quantity", width=80, anchor=tk.CENTER)
         self.trade_tree.column("profit", width=125, anchor=tk.CENTER)
         self.trade_tree.column("return", width=85, anchor=tk.CENTER)
+        self.trade_tree.column("remark", width=220, anchor=tk.CENTER, stretch=True)
         self.trade_tree.tag_configure(
             "high_return",
             background=HIGH_RETURN_BACKGROUND,
@@ -658,8 +678,6 @@ class StockTradeWindow(tk.Toplevel):
             borderwidth=1,
             relief=tk.FLAT,
         )
-        self.context_menu.add_command(label="修改", command=self._modify_selected)
-        self.context_menu.add_command(label="删除", command=self._delete_selected)
         self.trade_tree.bind("<Button-1>", self._clear_selection_on_blank)
         self.trade_tree.bind("<Button-3>", self._show_context_menu)
         self.trade_tree.bind(
@@ -679,7 +697,10 @@ class StockTradeWindow(tk.Toplevel):
 
         ttk.Label(
             outer,
-            text="右键交易记录可修改或删除；行情接口价格不会作为交易记录保存。",
+            text=(
+                "右键单笔记录可修改或删除；Ctrl+左键可多选买卖记录并执行 T 操作；"
+                "行情接口价格不会作为交易记录保存。"
+            ),
             style="Hint.TLabel",
         ).pack(anchor=tk.W, pady=(10, 0))
         self._reload_records()
@@ -687,9 +708,30 @@ class StockTradeWindow(tk.Toplevel):
 
     def _reload_records(self) -> None:
         self.trade_tree.delete(*self.trade_tree.get_children(""))
-        for index, record in enumerate(
-            self.owner.trades.get(self.symbol.canonical, [])
-        ):
+        groups_by_first_index: dict[int, tuple[TTradeGroup, tuple, tuple[str, ...]]] = {}
+        grouped_indices: set[int] = set()
+        for group in self.owner.t_trade_groups.get(self.symbol.canonical, []):
+            row = self._t_trade_row(group)
+            if row is None:
+                continue
+            groups_by_first_index[group.record_indices[0]] = (group, row[0], row[1])
+            grouped_indices.update(group.record_indices)
+
+        records = self.owner.trades.get(self.symbol.canonical, [])
+        for index, record in enumerate(records):
+            group_row = groups_by_first_index.get(index)
+            if group_row is not None:
+                group, values, tags = group_row
+                self.trade_tree.insert(
+                    "",
+                    tk.END,
+                    iid=f"{T_TRADE_ITEM_PREFIX}{group.group_id}",
+                    values=values,
+                    tags=tags,
+                )
+                continue
+            if index in grouped_indices:
+                continue
             profit, return_rate = self.owner._calculate_trade_performance(
                 self.symbol,
                 record,
@@ -705,10 +747,54 @@ class StockTradeWindow(tk.Toplevel):
                     record.quantity,
                     profit,
                     return_rate,
+                    "",
                 ),
                 tags=self._trade_row_tags(record),
             )
         self.refresh_summary()
+
+    def _t_trade_row(
+        self,
+        group: TTradeGroup,
+    ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+        summary = self.owner._calculate_t_trade_summary(self.symbol, group)
+        if summary is None:
+            return None
+
+        residual = summary.residual_record
+        if residual is None:
+            trade_type = "T交易"
+            price = "--"
+            quantity = "0"
+            profit = "--"
+            return_rate = "--"
+            tags: tuple[str, ...] = ()
+        else:
+            trade_type = residual.trade_type
+            price = f"{Decimal(residual.price):,.3f} {self.currency}"
+            quantity = residual.quantity
+            profit, return_rate = self.owner._calculate_trade_performance(
+                self.symbol,
+                residual,
+            )
+            tags = self._trade_row_tags(residual)
+
+        remark = (
+            f"T交易｜合并 {summary.record_count} 笔｜"
+            f"获利 {summary.realized_profit:+,.2f} {self.currency}"
+        )
+        return (
+            (
+                summary.trade_date,
+                trade_type,
+                price,
+                quantity,
+                profit,
+                return_rate,
+                remark,
+            ),
+            tags,
+        )
 
     def refresh_summary(self) -> None:
         holding_count, _, _, profit, return_rate = (
@@ -725,7 +811,7 @@ class StockTradeWindow(tk.Toplevel):
             if not self.trade_tree.exists(item_id):
                 continue
             values = list(self.trade_tree.item(item_id, "values"))
-            if len(values) != 6:
+            if len(values) != len(TRADE_COLUMNS):
                 continue
             values[4], values[5] = self.owner._calculate_trade_performance(
                 self.symbol,
@@ -736,6 +822,13 @@ class StockTradeWindow(tk.Toplevel):
                 values=values,
                 tags=self._trade_row_tags(record),
             )
+        for group in self.owner.t_trade_groups.get(self.symbol.canonical, []):
+            item_id = f"{T_TRADE_ITEM_PREFIX}{group.group_id}"
+            if not self.trade_tree.exists(item_id):
+                continue
+            row = self._t_trade_row(group)
+            if row is not None:
+                self.trade_tree.item(item_id, values=row[0], tags=row[1])
         if self._sort_column is not None:
             self._sort_records(self._sort_column, self._sort_descending)
         self._schedule_trade_cell_labels()
@@ -754,6 +847,25 @@ class StockTradeWindow(tk.Toplevel):
         sortable_items: list[tuple[str, str | Decimal]] = []
         missing_items: list[str] = []
         for item_id in self.trade_tree.get_children(""):
+            if item_id.startswith(T_TRADE_ITEM_PREFIX):
+                displayed_value = self.trade_tree.set(item_id, column)
+                if column == "trade_date":
+                    sortable_items.append((item_id, displayed_value))
+                    continue
+                match = re.match(
+                    r"^\s*([+-]?\d[\d,]*(?:\.\d+)?)",
+                    displayed_value,
+                )
+                if match is None:
+                    missing_items.append(item_id)
+                    continue
+                sortable_items.append(
+                    (
+                        item_id,
+                        Decimal(match.group(1).replace(",", "")),
+                    )
+                )
+                continue
             if not item_id.startswith("trade-"):
                 missing_items.append(item_id)
                 continue
@@ -872,8 +984,8 @@ class StockTradeWindow(tk.Toplevel):
                     )
                     label.bind(
                         "<Button-1>",
-                        lambda _event, selected=item_id: (
-                            self._select_trade_from_overlay(selected)
+                        lambda event, selected=item_id: (
+                            self._select_trade_from_overlay(event, selected)
                         ),
                     )
                     label.bind(
@@ -906,8 +1018,15 @@ class StockTradeWindow(tk.Toplevel):
                 label.destroy()
                 self._trade_cell_labels.pop(key, None)
 
-    def _select_trade_from_overlay(self, item_id: str) -> str:
-        self.trade_tree.selection_set(item_id)
+    def _select_trade_from_overlay(self, event: tk.Event, item_id: str) -> str:
+        selected_items = set(self.trade_tree.selection())
+        if event.state & 0x0004:
+            if item_id in selected_items:
+                self.trade_tree.selection_remove(item_id)
+            else:
+                self.trade_tree.selection_add(item_id)
+        else:
+            self.trade_tree.selection_set(item_id)
         self.trade_tree.focus(item_id)
         self._schedule_trade_cell_labels()
         return "break"
@@ -917,13 +1036,11 @@ class StockTradeWindow(tk.Toplevel):
         event: tk.Event,
         item_id: str,
     ) -> str:
-        self.trade_tree.selection_set(item_id)
+        if item_id not in self.trade_tree.selection():
+            self.trade_tree.selection_set(item_id)
         self.trade_tree.focus(item_id)
         self._schedule_trade_cell_labels()
-        try:
-            self.context_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self.context_menu.grab_release()
+        self._popup_context_menu(event)
         return "break"
 
     def _scroll_from_overlay(self, event: tk.Event) -> str:
@@ -961,7 +1078,7 @@ class StockTradeWindow(tk.Toplevel):
 
     def _selected_record_index(self) -> int | None:
         selection = self.trade_tree.selection()
-        if not selection or not selection[0].startswith("trade-"):
+        if len(selection) != 1 or not selection[0].startswith("trade-"):
             return None
         try:
             index = int(selection[0].removeprefix("trade-"))
@@ -969,6 +1086,48 @@ class StockTradeWindow(tk.Toplevel):
             return None
         records = self.owner.trades.get(self.symbol.canonical, [])
         return index if 0 <= index < len(records) else None
+
+    def _selected_record_indices(self) -> tuple[int, ...]:
+        records = self.owner.trades.get(self.symbol.canonical, [])
+        indices: list[int] = []
+        for item_id in self.trade_tree.selection():
+            if not item_id.startswith("trade-"):
+                return ()
+            try:
+                index = int(item_id.removeprefix("trade-"))
+            except ValueError:
+                return ()
+            if not 0 <= index < len(records):
+                return ()
+            indices.append(index)
+        return tuple(sorted(set(indices)))
+
+    def _configure_context_menu(self) -> bool:
+        selection = self.trade_tree.selection()
+        self.context_menu.delete(0, tk.END)
+        if len(selection) == 1 and selection[0].startswith(T_TRADE_ITEM_PREFIX):
+            self.context_menu.add_command(
+                label="取消T交易",
+                command=self._cancel_selected_t_trade,
+            )
+        elif len(selection) >= 2 and all(
+            item_id.startswith("trade-") for item_id in selection
+        ):
+            self.context_menu.add_command(label="T操作", command=self._create_t_trade)
+        elif len(selection) == 1 and selection[0].startswith("trade-"):
+            self.context_menu.add_command(label="修改", command=self._modify_selected)
+            self.context_menu.add_command(label="删除", command=self._delete_selected)
+        else:
+            return False
+        return True
+
+    def _popup_context_menu(self, event: tk.Event) -> None:
+        if not self._configure_context_menu():
+            return
+        try:
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.context_menu.grab_release()
 
     def _show_context_menu(self, event: tk.Event) -> str | None:
         if self.trade_tree.identify_region(event.x, event.y) == "heading":
@@ -981,14 +1140,66 @@ class StockTradeWindow(tk.Toplevel):
         item_id = self.trade_tree.identify_row(event.y)
         if not item_id:
             return None
+        if item_id not in self.trade_tree.selection():
+            self.trade_tree.selection_set(item_id)
+        self.trade_tree.focus(item_id)
+        self._schedule_trade_cell_labels()
+        self._popup_context_menu(event)
+        return "break"
+
+    def _create_t_trade(self) -> None:
+        indices = self._selected_record_indices()
+        if len(indices) < 2:
+            return
+        records = self.owner.trades.get(self.symbol.canonical, [])
+        selected_records = [records[index] for index in indices]
+        if not any(record.trade_type == "买入" for record in selected_records) or not any(
+            record.trade_type == "卖出" for record in selected_records
+        ):
+            messagebox.showwarning(
+                "无法执行 T 操作",
+                "选中的交易必须同时包含买入和卖出记录。",
+                parent=self,
+            )
+            return
+
+        group = self.owner._create_t_trade_group(self.symbol, indices)
+        if group is None:
+            messagebox.showerror(
+                "保存失败",
+                "T 交易标记未能写入本机保存文件，请检查目录权限后重试。",
+                parent=self,
+            )
+            return
+        self._reload_records()
+        item_id = f"{T_TRADE_ITEM_PREFIX}{group.group_id}"
         self.trade_tree.selection_set(item_id)
         self.trade_tree.focus(item_id)
         self._schedule_trade_cell_labels()
-        try:
-            self.context_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self.context_menu.grab_release()
-        return "break"
+
+    def _cancel_selected_t_trade(self) -> None:
+        selection = self.trade_tree.selection()
+        if len(selection) != 1 or not selection[0].startswith(T_TRADE_ITEM_PREFIX):
+            return
+        group_id = selection[0].removeprefix(T_TRADE_ITEM_PREFIX)
+        group = self.owner._cancel_t_trade_group(self.symbol, group_id)
+        if group is None:
+            messagebox.showerror(
+                "取消失败",
+                "T 交易标记未能从本机保存文件中移除，请检查目录权限后重试。",
+                parent=self,
+            )
+            return
+        self._reload_records()
+        restored_items = [
+            f"trade-{index}"
+            for index in group.record_indices
+            if self.trade_tree.exists(f"trade-{index}")
+        ]
+        if restored_items:
+            self.trade_tree.selection_set(*restored_items)
+            self.trade_tree.focus(restored_items[0])
+        self._schedule_trade_cell_labels()
 
     def _modify_selected(self) -> None:
         index = self._selected_record_index()
@@ -1062,6 +1273,7 @@ class StockPriceApp(tk.Tk):
         self.symbols: dict[str, StockSymbol] = {}
         self.display_names: dict[str, str] = {}
         self.trades: dict[str, list[TradeRecord]] = {}
+        self.t_trade_groups: dict[str, list[TTradeGroup]] = {}
         self.current_prices: dict[str, tuple[Decimal, str]] = {}
         self._trade_windows: dict[str, StockTradeWindow] = {}
         self.trees: dict[str, ttk.Treeview] = {}
@@ -1737,6 +1949,52 @@ class StockPriceApp(tk.Tk):
                     if records:
                         self.trades[trade_symbol.canonical] = records
 
+            saved_t_trade_groups = payload.get("t_trade_groups")
+            if isinstance(saved_t_trade_groups, dict):
+                for raw_symbol, raw_groups in saved_t_trade_groups.items():
+                    try:
+                        group_symbol = normalize_symbol(str(raw_symbol))
+                    except ValueError:
+                        continue
+                    records = self.trades.get(group_symbol.canonical, [])
+                    if not records or not isinstance(raw_groups, list):
+                        continue
+
+                    loaded_groups: list[TTradeGroup] = []
+                    claimed_indices: set[int] = set()
+                    group_ids: set[str] = set()
+                    for raw_group in raw_groups:
+                        if not isinstance(raw_group, dict):
+                            continue
+                        group_id = str(raw_group.get("group_id") or "").strip()
+                        raw_indices = raw_group.get("record_indices")
+                        if (
+                            not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", group_id)
+                            or group_id in group_ids
+                            or not isinstance(raw_indices, list)
+                            or len(raw_indices) < 2
+                            or any(
+                                isinstance(index, bool) or not isinstance(index, int)
+                                for index in raw_indices
+                            )
+                        ):
+                            continue
+                        indices = tuple(sorted(set(raw_indices)))
+                        if (
+                            len(indices) != len(raw_indices)
+                            or any(index < 0 or index >= len(records) for index in indices)
+                            or claimed_indices.intersection(indices)
+                        ):
+                            continue
+                        group = TTradeGroup(group_id, indices)
+                        if self._calculate_t_trade_summary(group_symbol, group) is None:
+                            continue
+                        loaded_groups.append(group)
+                        group_ids.add(group_id)
+                        claimed_indices.update(indices)
+                    if loaded_groups:
+                        self.t_trade_groups[group_symbol.canonical] = loaded_groups
+
             for symbol in self.symbols.values():
                 self._refresh_performance_cells(symbol)
 
@@ -1784,6 +2042,17 @@ class StockPriceApp(tk.Tk):
                 ]
                 for symbol, records in self.trades.items()
                 if records
+            },
+            "t_trade_groups": {
+                symbol: [
+                    {
+                        "group_id": group.group_id,
+                        "record_indices": list(group.record_indices),
+                    }
+                    for group in groups
+                ]
+                for symbol, groups in self.t_trade_groups.items()
+                if groups
             },
         }
         for market in MARKET_ORDER:
@@ -2411,6 +2680,11 @@ class StockPriceApp(tk.Tk):
         records = self.trades.get(symbol.canonical, [])
         if not 0 <= index < len(records):
             return False
+        if any(
+            index in group.record_indices
+            for group in self.t_trade_groups.get(symbol.canonical, [])
+        ):
+            return False
         previous = records[index]
         records[index] = record
         if self._save_state():
@@ -2426,17 +2700,168 @@ class StockPriceApp(tk.Tk):
         records = self.trades.get(symbol.canonical, [])
         if not 0 <= index < len(records):
             return False
+        previous_groups = list(self.t_trade_groups.get(symbol.canonical, []))
+        if any(index in group.record_indices for group in previous_groups):
+            return False
+        adjusted_groups = [
+            TTradeGroup(
+                group.group_id,
+                tuple(
+                    record_index - 1 if record_index > index else record_index
+                    for record_index in group.record_indices
+                ),
+            )
+            for group in previous_groups
+        ]
+        if adjusted_groups:
+            self.t_trade_groups[symbol.canonical] = adjusted_groups
         deleted = records.pop(index)
         if self._save_state():
             if not records:
                 self.trades.pop(symbol.canonical, None)
+                self.t_trade_groups.pop(symbol.canonical, None)
             self._refresh_performance_cells(symbol)
             self.status_var.set(
                 f"已删除 {symbol.canonical} 的交易记录：{deleted.trade_date}。"
             )
             return True
         records.insert(index, deleted)
+        if previous_groups:
+            self.t_trade_groups[symbol.canonical] = previous_groups
+        else:
+            self.t_trade_groups.pop(symbol.canonical, None)
         return False
+
+    def _calculate_t_trade_summary(
+        self,
+        symbol: StockSymbol,
+        group: TTradeGroup,
+    ) -> TTradeSummary | None:
+        records = self.trades.get(symbol.canonical, [])
+        try:
+            selected_records = [records[index] for index in group.record_indices]
+        except IndexError:
+            return None
+        if len(selected_records) < 2:
+            return None
+
+        buy_records = [
+            record for record in selected_records if record.trade_type == "买入"
+        ]
+        sell_records = [
+            record for record in selected_records if record.trade_type == "卖出"
+        ]
+        if not buy_records or not sell_records:
+            return None
+
+        try:
+            buy_quantity = sum(
+                (Decimal(record.quantity) for record in buy_records),
+                Decimal("0"),
+            )
+            sell_quantity = sum(
+                (Decimal(record.quantity) for record in sell_records),
+                Decimal("0"),
+            )
+            buy_amount = sum(
+                (
+                    Decimal(record.price) * Decimal(record.quantity)
+                    for record in buy_records
+                ),
+                Decimal("0"),
+            )
+            sell_amount = sum(
+                (
+                    Decimal(record.price) * Decimal(record.quantity)
+                    for record in sell_records
+                ),
+                Decimal("0"),
+            )
+        except InvalidOperation:
+            return None
+        if buy_quantity <= 0 or sell_quantity <= 0:
+            return None
+
+        matched_quantity = min(buy_quantity, sell_quantity)
+        average_buy_price = buy_amount / buy_quantity
+        average_sell_price = sell_amount / sell_quantity
+        realized_profit = (
+            average_sell_price - average_buy_price
+        ) * matched_quantity
+        matched_buy_amount = average_buy_price * matched_quantity
+        realized_return = realized_profit / matched_buy_amount
+        net_quantity = buy_quantity - sell_quantity
+
+        residual_record: TradeRecord | None = None
+        if net_quantity != 0:
+            residual_price = (
+                average_buy_price if net_quantity > 0 else average_sell_price
+            )
+            residual_record = TradeRecord(
+                trade_date=max(record.trade_date for record in selected_records),
+                price=format(residual_price.normalize(), "f"),
+                quantity=format(abs(net_quantity), "f"),
+                trade_type="买入" if net_quantity > 0 else "卖出",
+            )
+
+        return TTradeSummary(
+            trade_date=max(record.trade_date for record in selected_records),
+            realized_profit=realized_profit,
+            realized_return=realized_return,
+            residual_record=residual_record,
+            record_count=len(selected_records),
+        )
+
+    def _create_t_trade_group(
+        self,
+        symbol: StockSymbol,
+        record_indices: tuple[int, ...],
+    ) -> TTradeGroup | None:
+        indices = tuple(sorted(set(record_indices)))
+        if len(indices) < 2 or len(indices) != len(record_indices):
+            return None
+        claimed_indices = {
+            index
+            for group in self.t_trade_groups.get(symbol.canonical, [])
+            for index in group.record_indices
+        }
+        if claimed_indices.intersection(indices):
+            return None
+
+        group = TTradeGroup(uuid.uuid4().hex, indices)
+        if self._calculate_t_trade_summary(symbol, group) is None:
+            return None
+        groups = self.t_trade_groups.setdefault(symbol.canonical, [])
+        groups.append(group)
+        if self._save_state():
+            self.status_var.set(
+                f"已将 {len(indices)} 笔 {symbol.canonical} 交易标记为 T 交易。"
+            )
+            return group
+        groups.pop()
+        if not groups:
+            self.t_trade_groups.pop(symbol.canonical, None)
+        return None
+
+    def _cancel_t_trade_group(
+        self,
+        symbol: StockSymbol,
+        group_id: str,
+    ) -> TTradeGroup | None:
+        groups = self.t_trade_groups.get(symbol.canonical, [])
+        group = next((item for item in groups if item.group_id == group_id), None)
+        if group is None:
+            return None
+        index = groups.index(group)
+        groups.pop(index)
+        if not groups:
+            self.t_trade_groups.pop(symbol.canonical, None)
+        if self._save_state():
+            self.status_var.set(f"已取消 {symbol.canonical} 的 T 交易标记。")
+            return group
+        restored_groups = self.t_trade_groups.setdefault(symbol.canonical, [])
+        restored_groups.insert(index, group)
+        return None
 
     def remove_selected(self, event: tk.Event | None = None) -> None:
         if self._refreshing:
