@@ -98,6 +98,17 @@ TRADE_HEADINGS = {
     "return": "收益率",
     "remark": "备注",
 }
+DEFAULT_TRADE_COLUMN_WIDTHS = {
+    "trade_date": 100,
+    "trade_type": 70,
+    "price": 105,
+    "quantity": 80,
+    "profit": 125,
+    "return": 85,
+    "remark": 220,
+}
+TRADE_WINDOW_DEFAULT_SIZE = (880, 430)
+TRADE_WINDOW_MIN_SIZE = (720, 340)
 SORTABLE_TRADE_COLUMNS = {"trade_date", "profit", "return"}
 T_TRADE_ITEM_PREFIX = "t-trade-"
 STATE_VERSION = 4
@@ -578,8 +589,9 @@ class StockTradeWindow(tk.Toplevel):
         self._trade_cell_labels: dict[tuple[str, str], tk.Label] = {}
         self._overlay_after_id: str | None = None
         self.title(f"交易记录 - {display_name or symbol.canonical}")
-        self.geometry("880x430")
-        self.minsize(720, 340)
+        trade_width, trade_height = owner.trade_window_size
+        self.geometry(f"{trade_width}x{trade_height}")
+        self.minsize(*TRADE_WINDOW_MIN_SIZE)
         self.transient(owner)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
@@ -645,13 +657,13 @@ class StockTradeWindow(tk.Toplevel):
                     )
                 )
             self.trade_tree.heading(column, **heading_options)
-        self.trade_tree.column("trade_date", width=100, anchor=tk.CENTER)
-        self.trade_tree.column("trade_type", width=70, anchor=tk.CENTER)
-        self.trade_tree.column("price", width=105, anchor=tk.CENTER)
-        self.trade_tree.column("quantity", width=80, anchor=tk.CENTER)
-        self.trade_tree.column("profit", width=125, anchor=tk.CENTER)
-        self.trade_tree.column("return", width=85, anchor=tk.CENTER)
-        self.trade_tree.column("remark", width=220, anchor=tk.CENTER, stretch=True)
+            self.trade_tree.column(
+                column,
+                width=owner.trade_column_widths[column],
+                minwidth=60,
+                anchor=tk.CENTER,
+                stretch=column == "remark",
+            )
         self.trade_tree.tag_configure(
             "high_return",
             background=HIGH_RETURN_BACKGROUND,
@@ -694,6 +706,12 @@ class StockTradeWindow(tk.Toplevel):
             self._schedule_trade_cell_labels,
             add="+",
         )
+        self.trade_tree.bind(
+            "<ButtonRelease-1>",
+            self._remember_layout,
+            add="+",
+        )
+        self.bind("<Configure>", self._remember_layout, add="+")
 
         ttk.Label(
             outer,
@@ -705,6 +723,9 @@ class StockTradeWindow(tk.Toplevel):
         ).pack(anchor=tk.W, pady=(10, 0))
         self._reload_records()
         _center_and_show(self, owner, fit_content=False)
+
+    def _remember_layout(self, _event: tk.Event | None = None) -> None:
+        self.owner._capture_trade_window_layout(self)
 
     def _reload_records(self) -> None:
         self.trade_tree.delete(*self.trade_tree.get_children(""))
@@ -1246,6 +1267,8 @@ class StockTradeWindow(tk.Toplevel):
             except tk.TclError:
                 pass
             self._overlay_after_id = None
+        self.owner._capture_trade_window_layout(self)
+        self.owner._save_state()
         self.owner._trade_windows.pop(self.symbol.canonical, None)
         self.destroy()
 
@@ -1274,6 +1297,8 @@ class StockPriceApp(tk.Tk):
         self.display_names: dict[str, str] = {}
         self.trades: dict[str, list[TradeRecord]] = {}
         self.t_trade_groups: dict[str, list[TTradeGroup]] = {}
+        self.trade_window_size = TRADE_WINDOW_DEFAULT_SIZE
+        self.trade_column_widths = DEFAULT_TRADE_COLUMN_WIDTHS.copy()
         self.current_prices: dict[str, tuple[Decimal, str]] = {}
         self._trade_windows: dict[str, StockTradeWindow] = {}
         self.trees: dict[str, ttk.Treeview] = {}
@@ -1781,6 +1806,27 @@ class StockPriceApp(tk.Tk):
                     tree.column(column, width=width)
         self._schedule_market_cell_labels()
 
+    def _capture_trade_window_layout(self, window: StockTradeWindow) -> None:
+        try:
+            if not window.winfo_exists():
+                return
+            minimum_width, minimum_height = TRADE_WINDOW_MIN_SIZE
+            width = max(
+                minimum_width,
+                min(window.winfo_width(), window.winfo_screenwidth()),
+            )
+            height = max(
+                minimum_height,
+                min(window.winfo_height(), window.winfo_screenheight()),
+            )
+            self.trade_window_size = (width, height)
+            self.trade_column_widths = {
+                column: int(window.trade_tree.column(column, "width"))
+                for column in TRADE_COLUMNS
+            }
+        except tk.TclError:
+            return
+
     def _refresh_restored_stocks(self, symbols: list[StockSymbol]) -> None:
         self._startup_refresh_after_id = None
         self._start_refresh(symbols)
@@ -1864,6 +1910,48 @@ class StockPriceApp(tk.Tk):
                     self._layout_after_id = self.after_idle(
                         lambda widths=widths_by_market: self._apply_column_widths(widths)
                     )
+
+            trade_geometry = str(payload.get("trade_window_geometry") or "")
+            trade_geometry_match = re.fullmatch(
+                r"(?P<width>\d+)x(?P<height>\d+)",
+                trade_geometry,
+            )
+            if trade_geometry_match is not None:
+                minimum_width, minimum_height = TRADE_WINDOW_MIN_SIZE
+                self.trade_window_size = (
+                    max(
+                        minimum_width,
+                        min(
+                            int(trade_geometry_match.group("width")),
+                            self.winfo_screenwidth(),
+                        ),
+                    ),
+                    max(
+                        minimum_height,
+                        min(
+                            int(trade_geometry_match.group("height")),
+                            self.winfo_screenheight(),
+                        ),
+                    ),
+                )
+                layout_restored = True
+
+            saved_trade_columns = payload.get("trade_column_widths")
+            if isinstance(saved_trade_columns, dict):
+                restored_trade_columns = DEFAULT_TRADE_COLUMN_WIDTHS.copy()
+                valid_trade_column_count = 0
+                for column in TRADE_COLUMNS:
+                    width = saved_trade_columns.get(column)
+                    if (
+                        isinstance(width, int)
+                        and not isinstance(width, bool)
+                        and 60 <= width <= 2000
+                    ):
+                        restored_trade_columns[column] = width
+                        valid_trade_column_count += 1
+                if valid_trade_column_count:
+                    self.trade_column_widths = restored_trade_columns
+                    layout_restored = True
 
             restored_count = 0
             first_restored_market = ""
@@ -2028,6 +2116,10 @@ class StockPriceApp(tk.Tk):
                 column: int(layout_tree.column(column, "width"))
                 for column in TABLE_COLUMNS
             },
+            "trade_window_geometry": (
+                f"{self.trade_window_size[0]}x{self.trade_window_size[1]}"
+            ),
+            "trade_column_widths": self.trade_column_widths.copy(),
             "active_market": self._active_market(),
             "stocks": [],
             "trades": {
@@ -2102,6 +2194,8 @@ class StockPriceApp(tk.Tk):
         if self._market_overlay_after_id is not None:
             self.after_cancel(self._market_overlay_after_id)
             self._market_overlay_after_id = None
+        for trade_window in list(self._trade_windows.values()):
+            self._capture_trade_window_layout(trade_window)
         self._save_state()
         self._release_state_lock()
         self.destroy()
