@@ -588,6 +588,9 @@ class StockTradeWindow(tk.Toplevel):
         self._sort_descending = False
         self._trade_cell_labels: dict[tuple[str, str], tk.Label] = {}
         self._overlay_after_id: str | None = None
+        self._paired_column_resize_start: (
+            tuple[ttk.Treeview, int, str, str, int, int] | None
+        ) = None
         self.title(f"交易记录 - {display_name or symbol.canonical}")
         trade_width, trade_height = owner.trade_window_size
         self.geometry(f"{trade_width}x{trade_height}")
@@ -691,6 +694,16 @@ class StockTradeWindow(tk.Toplevel):
             relief=tk.FLAT,
         )
         self.trade_tree.bind("<Button-1>", self._clear_selection_on_blank)
+        self.trade_tree.bind(
+            "<ButtonPress-1>",
+            self._begin_column_resize,
+            add="+",
+        )
+        self.trade_tree.bind(
+            "<B1-Motion>",
+            self._resize_adjacent_columns,
+            add="+",
+        )
         self.trade_tree.bind("<Button-3>", self._show_context_menu)
         self.trade_tree.bind(
             "<<TreeviewSelect>>",
@@ -711,6 +724,11 @@ class StockTradeWindow(tk.Toplevel):
             self._remember_layout,
             add="+",
         )
+        self.trade_tree.bind(
+            "<ButtonRelease-1>",
+            self._finish_column_resize,
+            add="+",
+        )
         self.bind("<Configure>", self._remember_layout, add="+")
 
         ttk.Label(
@@ -726,6 +744,69 @@ class StockTradeWindow(tk.Toplevel):
 
     def _remember_layout(self, _event: tk.Event | None = None) -> None:
         self.owner._capture_trade_window_layout(self)
+
+    def _begin_column_resize(self, event: tk.Event) -> str | None:
+        if self.trade_tree.identify_region(event.x, event.y) != "separator":
+            self._paired_column_resize_start = None
+            return None
+
+        column_id = self.trade_tree.identify_column(event.x)
+        try:
+            column_index = int(column_id.removeprefix("#")) - 1
+        except ValueError:
+            self._paired_column_resize_start = None
+            return None
+        if not 0 <= column_index < len(TRADE_COLUMNS) - 1:
+            self._paired_column_resize_start = None
+            return None
+
+        current_column = TRADE_COLUMNS[column_index]
+        right_column = TRADE_COLUMNS[column_index + 1]
+        self._paired_column_resize_start = (
+            self.trade_tree,
+            event.x_root,
+            current_column,
+            right_column,
+            int(self.trade_tree.column(current_column, "width")),
+            int(self.trade_tree.column(right_column, "width")),
+        )
+        return "break"
+
+    def _resize_adjacent_columns(self, event: tk.Event) -> str | None:
+        resize_start = self._paired_column_resize_start
+        if resize_start is None or event.widget is not resize_start[0]:
+            return None
+
+        (
+            tree,
+            start_x,
+            current_column,
+            right_column,
+            current_width,
+            right_width,
+        ) = resize_start
+        current_minimum = int(tree.column(current_column, "minwidth"))
+        right_minimum = int(tree.column(right_column, "minwidth"))
+        requested_delta = event.x_root - start_x
+        delta = max(
+            current_minimum - current_width,
+            min(right_width - right_minimum, requested_delta),
+        )
+        tree.column(current_column, width=current_width + delta)
+        tree.column(right_column, width=right_width - delta)
+        self._schedule_trade_cell_labels()
+        return "break"
+
+    def _finish_column_resize(self, event: tk.Event) -> str | None:
+        resize_start = self._paired_column_resize_start
+        self._paired_column_resize_start = None
+        if resize_start is None or event.widget is not resize_start[0]:
+            return None
+
+        self.owner._capture_trade_window_layout(self)
+        self.owner._save_state()
+        self._schedule_trade_cell_labels()
+        return "break"
 
     def _reload_records(self) -> None:
         self.trade_tree.delete(*self.trade_tree.get_children(""))
@@ -1309,8 +1390,8 @@ class StockPriceApp(tk.Tk):
         self._market_overlay_after_id: str | None = None
         self._swipe_start: tuple[ttk.Treeview, int, int] | None = None
         self._column_resize_tree: ttk.Treeview | None = None
-        self._profit_return_resize_start: (
-            tuple[ttk.Treeview, int, int, int] | None
+        self._paired_market_resize_start: (
+            tuple[ttk.Treeview, int, str, str, int, int] | None
         ) = None
         self._result_queue: queue.Queue[tuple] = queue.Queue()
         self._refreshing = False
@@ -1646,7 +1727,7 @@ class StockPriceApp(tk.Tk):
             tree.tag_configure("waiting", foreground=TEXT_PRIMARY)
             tree.bind("<Button-1>", self._clear_selection_on_blank)
             tree.bind("<ButtonPress-1>", self._begin_market_swipe, add="+")
-            tree.bind("<B1-Motion>", self._resize_profit_and_return, add="+")
+            tree.bind("<B1-Motion>", self._resize_market_columns, add="+")
             tree.bind("<ButtonRelease-1>", self._finish_market_swipe, add="+")
             tree.bind(
                 "<<TreeviewSelect>>",
@@ -2548,7 +2629,7 @@ class StockPriceApp(tk.Tk):
         tree.focus(item_id)
         tree.focus_set()
         self._column_resize_tree = None
-        self._profit_return_resize_start = None
+        self._paired_market_resize_start = None
         self._swipe_start = (
             tree,
             event.x_root - tree.winfo_rootx(),
@@ -2622,44 +2703,58 @@ class StockPriceApp(tk.Tk):
             if tree.identify_region(event.x, event.y) == "separator":
                 self._column_resize_tree = tree
                 self._swipe_start = None
-                if tree.identify_column(event.x) == (
-                    f"#{TABLE_COLUMNS.index('profit') + 1}"
-                ):
-                    self._profit_return_resize_start = (
+                column_id = tree.identify_column(event.x)
+                try:
+                    column_index = int(column_id.removeprefix("#")) - 1
+                except ValueError:
+                    column_index = -1
+                if 0 <= column_index < len(TABLE_COLUMNS) - 1:
+                    current_column = TABLE_COLUMNS[column_index]
+                    right_column = TABLE_COLUMNS[column_index + 1]
+                    self._paired_market_resize_start = (
                         tree,
                         event.x_root,
-                        int(tree.column("profit", "width")),
-                        int(tree.column("return", "width")),
+                        current_column,
+                        right_column,
+                        int(tree.column(current_column, "width")),
+                        int(tree.column(right_column, "width")),
                     )
                     return "break"
-                self._profit_return_resize_start = None
+                self._paired_market_resize_start = None
                 return None
             self._column_resize_tree = None
-            self._profit_return_resize_start = None
+            self._paired_market_resize_start = None
             self._swipe_start = (tree, event.x, event.y)
         return None
 
-    def _resize_profit_and_return(self, event: tk.Event) -> str | None:
-        resize_start = self._profit_return_resize_start
+    def _resize_market_columns(self, event: tk.Event) -> str | None:
+        resize_start = self._paired_market_resize_start
         if resize_start is None or event.widget is not resize_start[0]:
             return None
 
-        tree, start_x, start_profit_width, start_return_width = resize_start
-        profit_minimum = int(tree.column("profit", "minwidth"))
-        return_minimum = int(tree.column("return", "minwidth"))
+        (
+            tree,
+            start_x,
+            current_column,
+            right_column,
+            current_width,
+            right_width,
+        ) = resize_start
+        current_minimum = int(tree.column(current_column, "minwidth"))
+        right_minimum = int(tree.column(right_column, "minwidth"))
         requested_delta = event.x_root - start_x
         delta = max(
-            profit_minimum - start_profit_width,
-            min(start_return_width - return_minimum, requested_delta),
+            current_minimum - current_width,
+            min(right_width - right_minimum, requested_delta),
         )
-        tree.column("profit", width=start_profit_width + delta)
-        tree.column("return", width=start_return_width - delta)
+        tree.column(current_column, width=current_width + delta)
+        tree.column(right_column, width=right_width - delta)
         self._schedule_market_cell_labels()
         return "break"
 
     def _finish_market_swipe(self, event: tk.Event) -> str | None:
-        paired_resize = self._profit_return_resize_start
-        self._profit_return_resize_start = None
+        paired_resize = self._paired_market_resize_start
+        self._paired_market_resize_start = None
         if paired_resize is not None and paired_resize[0] is event.widget:
             resize_tree = paired_resize[0]
             self._column_resize_tree = None
