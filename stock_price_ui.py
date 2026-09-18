@@ -67,6 +67,8 @@ DEFAULT_COLUMN_WIDTHS = {
     "profit": 125,
     "return": 95,
 }
+MARKET_ROW_HEIGHT = 32
+MARKET_SPACER_PREFIX = "__market_spacer__"
 APP_BACKGROUND = "#F4F7FB"
 SURFACE = "#FFFFFF"
 SURFACE_MUTED = "#EAF0F8"
@@ -1385,6 +1387,7 @@ class StockPriceApp(tk.Tk):
         self._trade_windows: dict[str, StockTradeWindow] = {}
         self.trees: dict[str, ttk.Treeview] = {}
         self.market_pages: dict[str, ttk.Frame] = {}
+        self._market_spacer_ids = {market: [] for market in MARKET_ORDER}
         self._market_cell_labels: dict[
             tuple[str, str], tk.Label
         ] = {}
@@ -1586,7 +1589,7 @@ class StockPriceApp(tk.Tk):
             bordercolor=DIVIDER,
             lightcolor=DIVIDER,
             darkcolor=DIVIDER,
-            rowheight=32,
+            rowheight=MARKET_ROW_HEIGHT,
             font=("Microsoft YaHei UI", 10),
         )
         style.map(
@@ -1743,11 +1746,18 @@ class StockPriceApp(tk.Tk):
             tree.bind("<ButtonRelease-1>", self._finish_market_swipe, add="+")
             tree.bind(
                 "<<TreeviewSelect>>",
-                self._schedule_market_cell_labels,
+                self._on_market_tree_selection,
             )
             tree.bind(
                 "<Configure>",
                 self._schedule_market_cell_labels,
+                add="+",
+            )
+            tree.bind(
+                "<Configure>",
+                lambda event, target_market=market: (
+                    self._update_market_spacers(target_market, event)
+                ),
                 add="+",
             )
             tree.bind(
@@ -2546,6 +2556,7 @@ class StockPriceApp(tk.Tk):
             ),
             tags=("waiting",),
         )
+        self._reorder_market_rows(symbol.market)
         tree.selection_set(symbol.canonical)
         tree.see(symbol.canonical)
         self._save_state()
@@ -2560,18 +2571,25 @@ class StockPriceApp(tk.Tk):
             return
         self._start_refresh(list(self.symbols.values()))
 
-    def _clear_selection_on_blank(self, event: tk.Event) -> None:
+    def _clear_selection_on_blank(self, event: tk.Event) -> str | None:
         tree = event.widget
         if not isinstance(tree, ttk.Treeview):
-            return
+            return None
         row_id = tree.identify_row(event.y)
         region = tree.identify_region(event.x, event.y)
-        if not row_id and region not in {"heading", "separator"}:
+        spacer_clicked = self._is_market_spacer(row_id)
+        if (not row_id or spacer_clicked) and region not in {
+            "heading",
+            "separator",
+        }:
             selected_items = tree.selection()
             if selected_items:
                 tree.selection_remove(*selected_items)
             tree.focus("")
             self._schedule_market_cell_labels()
+            if spacer_clicked:
+                return "break"
+        return None
 
     def _show_market_context_menu(self, event: tk.Event) -> str | None:
         tree = event.widget
@@ -2579,7 +2597,10 @@ class StockPriceApp(tk.Tk):
             return None
         row_id = tree.identify_row(event.y)
         region = tree.identify_region(event.x, event.y)
-        if row_id or region in {"heading", "separator"}:
+        if (
+            (row_id and not self._is_market_spacer(row_id))
+            or region in {"heading", "separator"}
+        ):
             return None
 
         market = next(
@@ -2634,6 +2655,65 @@ class StockPriceApp(tk.Tk):
         except tk.TclError:
             self._market_overlay_after_id = None
 
+    def _on_market_tree_selection(self, event: tk.Event) -> None:
+        tree = event.widget
+        if not isinstance(tree, ttk.Treeview):
+            return
+        spacer_ids = [
+            item_id
+            for item_id in tree.selection()
+            if self._is_market_spacer(item_id)
+        ]
+        if spacer_ids:
+            tree.selection_remove(*spacer_ids)
+            if self._is_market_spacer(tree.focus()):
+                tree.focus("")
+        self._schedule_market_cell_labels()
+
+    @staticmethod
+    def _is_market_spacer(item_id: str) -> bool:
+        return item_id.startswith(MARKET_SPACER_PREFIX)
+
+    def _update_market_spacers(
+        self,
+        market: str,
+        _event: tk.Event | None = None,
+    ) -> None:
+        tree = self.trees.get(market)
+        if tree is None:
+            return
+
+        visible_real_ids = [
+            item_id
+            for item_id in tree.get_children("")
+            if item_id in self.symbols
+        ]
+        desired_count = 0
+        if visible_real_ids:
+            visible_row_count = max(1, tree.winfo_height() // MARKET_ROW_HEIGHT)
+            desired_count = max(1, visible_row_count // 2)
+
+        spacer_ids = self._market_spacer_ids[market]
+        spacer_ids[:] = [item_id for item_id in spacer_ids if tree.exists(item_id)]
+        while len(spacer_ids) > desired_count:
+            item_id = spacer_ids.pop()
+            if tree.exists(item_id):
+                tree.delete(item_id)
+        while len(spacer_ids) < desired_count:
+            item_id = f"{MARKET_SPACER_PREFIX}{market}_{len(spacer_ids)}"
+            tree.insert(
+                "",
+                tk.END,
+                iid=item_id,
+                values=("",) * len(TABLE_COLUMNS),
+                tags=("spacer",),
+            )
+            spacer_ids.append(item_id)
+        for item_id in spacer_ids:
+            tree.move(item_id, "", tk.END)
+
+        self._schedule_market_cell_labels()
+
     def _render_market_cell_labels(self) -> None:
         self._market_overlay_after_id = None
         visible_labels: set[tuple[str, str]] = set()
@@ -2646,6 +2726,8 @@ class StockPriceApp(tk.Tk):
 
             selected_items = set(tree.selection())
             for item_id in tree.get_children(""):
+                if item_id not in self.symbols:
+                    continue
                 background = (
                     ACCENT_SOFT if item_id in selected_items else SURFACE
                 )
@@ -3175,12 +3257,19 @@ class StockPriceApp(tk.Tk):
         tree = event.widget if event is not None else self._active_tree()
         if not isinstance(tree, ttk.Treeview):
             tree = self._active_tree()
+        market = next(
+            (name for name, market_tree in self.trees.items() if market_tree is tree),
+            self._active_market(),
+        )
         for item_id in tree.selection():
+            if item_id not in self.symbols:
+                continue
             tree.delete(item_id)
             self.symbols.pop(item_id, None)
             self.display_names.pop(item_id, None)
             self.current_prices.pop(item_id, None)
         self._schedule_market_cell_labels()
+        self._update_market_spacers(market)
         self._refresh_market_summary()
         self._save_state()
         self.status_var.set(f"列表中共有 {len(self.symbols)} 只股票。")
@@ -3228,7 +3317,11 @@ class StockPriceApp(tk.Tk):
         if tree is None:
             return
 
-        item_ids = list(tree.get_children(""))
+        item_ids = [
+            item_id
+            for item_id in tree.get_children("")
+            if item_id in self.symbols
+        ]
         ordered_ids = sorted(
             item_ids,
             key=lambda item_id: (
@@ -3242,6 +3335,7 @@ class StockPriceApp(tk.Tk):
         )
         for position, item_id in enumerate(ordered_ids):
             tree.move(item_id, "", position)
+        self._update_market_spacers(market)
         self._schedule_market_cell_labels()
 
     def _calculate_market_metrics(
