@@ -9,6 +9,7 @@ import msvcrt
 import os
 import queue
 import re
+import sys
 import threading
 import tkinter as tk
 import uuid
@@ -122,6 +123,8 @@ WINDOW_GEOMETRY_PATTERN = re.compile(
 
 
 def _default_state_path() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().with_name("state.json")
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
         return Path(local_app_data) / "StockPriceViewer" / "state.json"
