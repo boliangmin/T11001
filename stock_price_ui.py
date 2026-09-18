@@ -117,9 +117,51 @@ SORTABLE_TRADE_COLUMNS = {"trade_date", "profit", "return"}
 T_TRADE_ITEM_PREFIX = "t-trade-"
 STATE_VERSION = 4
 AUTO_REFRESH_INTERVAL_MS = 5 * 60 * 1000
+APP_ICON_FILENAME = "trade_view.ico"
+WINDOWS_APP_USER_MODEL_ID = "Blmcc.TradeView.1.0"
 WINDOW_GEOMETRY_PATTERN = re.compile(
     r"^(?P<width>\d+)x(?P<height>\d+)(?P<x>[+-]\d+)(?P<y>[+-]\d+)$"
 )
+
+
+def _resource_path(filename: str) -> Path:
+    candidates: list[Path] = []
+    bundle_directory = getattr(sys, "_MEIPASS", None)
+    if bundle_directory:
+        candidates.append(Path(bundle_directory))
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent)
+    candidates.append(Path(__file__).resolve().parent)
+
+    for directory in candidates:
+        path = directory / filename
+        if path.is_file():
+            return path
+    return candidates[-1] / filename
+
+
+def _configure_windows_app_identity() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            WINDOWS_APP_USER_MODEL_ID
+        )
+    except (AttributeError, OSError):
+        pass
+
+
+def _apply_window_icon(window: tk.Misc) -> None:
+    icon_path = _resource_path(APP_ICON_FILENAME)
+    if not icon_path.is_file():
+        return
+    try:
+        window.iconbitmap(default=str(icon_path))
+        window.iconbitmap(str(icon_path))
+    except (OSError, tk.TclError):
+        pass
 
 
 def _default_state_path() -> Path:
@@ -1364,6 +1406,7 @@ class StockTradeWindow(tk.Toplevel):
 class StockPriceApp(tk.Tk):
     def __init__(self, state_path: Path | None = None) -> None:
         super().__init__()
+        _apply_window_icon(self)
         self.withdraw()
         self.configure(background=APP_BACKGROUND)
         self.title("我钱呢")
@@ -3710,6 +3753,7 @@ class StockPriceApp(tk.Tk):
 
 
 def main() -> None:
+    _configure_windows_app_identity()
     try:
         app = StockPriceApp()
     except AlreadyRunningError:
