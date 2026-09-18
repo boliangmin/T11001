@@ -77,6 +77,7 @@ TEXT_SECONDARY = TEXT_PRIMARY
 ACCENT = "#2563EB"
 ACCENT_HOVER = "#1D4ED8"
 ACCENT_SOFT = "#DBEAFE"
+TAB_SELECTED_BACKGROUND = "#8DB600"
 BUY_COLOR = "#DC2626"
 SELL_COLOR = "#059669"
 HIGH_RETURN_BACKGROUND = "#FEF3C7"
@@ -1576,7 +1577,10 @@ class StockPriceApp(tk.Tk):
         )
         style.map(
             "TNotebook.Tab",
-            background=[("selected", ACCENT), ("active", ACCENT_SOFT)],
+            background=[
+                ("selected", TAB_SELECTED_BACKGROUND),
+                ("active", ACCENT_SOFT),
+            ],
             foreground=[("selected", TEXT_PRIMARY), ("active", TEXT_PRIMARY)],
             font=[
                 ("selected", ("Microsoft YaHei UI", 12, "bold")),
