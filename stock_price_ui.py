@@ -1380,6 +1380,7 @@ class StockPriceApp(tk.Tk):
         self.t_trade_groups: dict[str, list[TTradeGroup]] = {}
         self.trade_window_size = TRADE_WINDOW_DEFAULT_SIZE
         self.trade_column_widths = DEFAULT_TRADE_COLUMN_WIDTHS.copy()
+        self.show_closed_positions = {market: True for market in MARKET_ORDER}
         self.current_prices: dict[str, tuple[Decimal, str]] = {}
         self._trade_windows: dict[str, StockTradeWindow] = {}
         self.trees: dict[str, ttk.Treeview] = {}
@@ -1695,6 +1696,16 @@ class StockPriceApp(tk.Tk):
 
         self.table_frame = ttk.Notebook(outer)
         self.table_frame.pack(fill=tk.BOTH, expand=True)
+        self.market_context_menu = tk.Menu(
+            self,
+            tearoff=False,
+            background=SURFACE,
+            foreground=TEXT_PRIMARY,
+            activebackground=ACCENT_SOFT,
+            activeforeground=TEXT_PRIMARY,
+            borderwidth=1,
+            relief=tk.FLAT,
+        )
 
         for market in MARKET_ORDER:
             page = ttk.Frame(self.table_frame)
@@ -1726,6 +1737,7 @@ class StockPriceApp(tk.Tk):
             tree.tag_configure("down", foreground=TEXT_PRIMARY)
             tree.tag_configure("waiting", foreground=TEXT_PRIMARY)
             tree.bind("<Button-1>", self._clear_selection_on_blank)
+            tree.bind("<Button-3>", self._show_market_context_menu)
             tree.bind("<ButtonPress-1>", self._begin_market_swipe, add="+")
             tree.bind("<B1-Motion>", self._resize_market_columns, add="+")
             tree.bind("<ButtonRelease-1>", self._finish_market_swipe, add="+")
@@ -1969,6 +1981,13 @@ class StockPriceApp(tk.Tk):
                 raise ValueError("保存文件版本不受支持")
 
             layout_restored = self._restore_geometry(payload.get("window_geometry"))
+            saved_closed_visibility = payload.get("show_closed_positions")
+            if isinstance(saved_closed_visibility, dict):
+                for market in MARKET_ORDER:
+                    value = saved_closed_visibility.get(market)
+                    if isinstance(value, bool):
+                        self.show_closed_positions[market] = value
+                        layout_restored = True
             saved_columns = payload.get("column_widths")
             if isinstance(saved_columns, dict):
                 active_market = str(payload.get("active_market") or "")
@@ -2244,6 +2263,7 @@ class StockPriceApp(tk.Tk):
             ),
             "trade_column_widths": self.trade_column_widths.copy(),
             "active_market": self._active_market(),
+            "show_closed_positions": self.show_closed_positions.copy(),
             "stocks": [],
             "trades": {
                 symbol: [
@@ -2271,7 +2291,13 @@ class StockPriceApp(tk.Tk):
             },
         }
         for market in MARKET_ORDER:
-            for item_id in self.trees[market].get_children(""):
+            visible_ids = list(self.trees[market].get_children(""))
+            hidden_ids = [
+                item_id
+                for item_id, symbol in self.symbols.items()
+                if symbol.market == market and item_id not in visible_ids
+            ]
+            for item_id in visible_ids + hidden_ids:
                 if item_id not in self.symbols:
                     continue
                 payload["stocks"].append(
@@ -2546,6 +2572,54 @@ class StockPriceApp(tk.Tk):
                 tree.selection_remove(*selected_items)
             tree.focus("")
             self._schedule_market_cell_labels()
+
+    def _show_market_context_menu(self, event: tk.Event) -> str | None:
+        tree = event.widget
+        if not isinstance(tree, ttk.Treeview):
+            return None
+        row_id = tree.identify_row(event.y)
+        region = tree.identify_region(event.x, event.y)
+        if row_id or region in {"heading", "separator"}:
+            return None
+
+        market = next(
+            (name for name, market_tree in self.trees.items() if market_tree is tree),
+            None,
+        )
+        if market is None:
+            return None
+        selected_items = tree.selection()
+        if selected_items:
+            tree.selection_remove(*selected_items)
+        tree.focus("")
+        self._configure_market_context_menu(market)
+        try:
+            self.market_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.market_context_menu.grab_release()
+        return "break"
+
+    def _configure_market_context_menu(self, market: str) -> None:
+        self.market_context_menu.delete(0, tk.END)
+        label = (
+            "隐藏已清仓股票"
+            if self.show_closed_positions[market]
+            else "显示已清仓股票"
+        )
+        self.market_context_menu.add_command(
+            label=label,
+            command=lambda selected_market=market: (
+                self._toggle_closed_positions_visibility(selected_market)
+            ),
+        )
+
+    def _toggle_closed_positions_visibility(self, market: str | None = None) -> None:
+        target_market = market or self._active_market()
+        self.show_closed_positions[target_market] = not self.show_closed_positions[
+            target_market
+        ]
+        self._apply_closed_position_visibility(target_market)
+        self._save_state()
 
     def _schedule_market_cell_labels(
         self,
@@ -3124,6 +3198,31 @@ class StockPriceApp(tk.Tk):
             return Decimal("0")
         return net_quantity
 
+    def _is_closed_position(self, symbol: StockSymbol) -> bool:
+        return bool(self.trades.get(symbol.canonical)) and (
+            self._net_holding_quantity(symbol) == 0
+        )
+
+    def _apply_closed_position_visibility(self, market: str) -> None:
+        tree = self.trees.get(market)
+        if tree is None:
+            return
+
+        visible_ids = set(tree.get_children(""))
+        show_closed = self.show_closed_positions[market]
+        for item_id, symbol in self.symbols.items():
+            if symbol.market != market or not tree.exists(item_id):
+                continue
+            should_show = show_closed or not self._is_closed_position(symbol)
+            if should_show and item_id not in visible_ids:
+                tree.move(item_id, "", tk.END)
+                visible_ids.add(item_id)
+            elif not should_show and item_id in visible_ids:
+                tree.detach(item_id)
+                visible_ids.remove(item_id)
+
+        self._reorder_market_rows(market)
+
     def _reorder_market_rows(self, market: str) -> None:
         tree = self.trees.get(market)
         if tree is None:
@@ -3324,7 +3423,7 @@ class StockPriceApp(tk.Tk):
             self._calculate_position_metrics(symbol)
         )
         tree.item(symbol.canonical, values=current)
-        self._reorder_market_rows(symbol.market)
+        self._apply_closed_position_visibility(symbol.market)
         self._refresh_market_summary()
         trade_window = self._trade_windows.get(symbol.canonical)
         if trade_window is not None and trade_window.winfo_exists():
