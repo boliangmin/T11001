@@ -1789,7 +1789,7 @@ class StockPriceApp(tk.Tk):
         self.latest_trade_label = ttk.Label(
             outer,
             textvariable=self.latest_trade_var,
-            anchor=tk.W,
+            anchor=tk.E,
         )
         self.latest_trade_label.pack(fill=tk.X, pady=(8, 0))
 
