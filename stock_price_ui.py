@@ -114,6 +114,7 @@ TRADE_WINDOW_MIN_SIZE = (720, 340)
 SORTABLE_TRADE_COLUMNS = {"trade_date", "profit", "return"}
 T_TRADE_ITEM_PREFIX = "t-trade-"
 STATE_VERSION = 4
+AUTO_REFRESH_INTERVAL_MS = 5 * 60 * 1000
 WINDOW_GEOMETRY_PATTERN = re.compile(
     r"^(?P<width>\d+)x(?P<height>\d+)(?P<x>[+-]\d+)(?P<y>[+-]\d+)$"
 )
@@ -1400,6 +1401,7 @@ class StockPriceApp(tk.Tk):
         self._result_queue: queue.Queue[tuple] = queue.Queue()
         self._refreshing = False
         self._queue_after_id: str | None = None
+        self._auto_refresh_after_id: str | None = None
         self._layout_after_id: str | None = None
         self._startup_refresh_after_id: str | None = None
         self._search_after_id: str | None = None
@@ -1416,6 +1418,7 @@ class StockPriceApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         _center_and_show(self, fit_content=False)
         self._queue_after_id = self.after(100, self._process_result_queue)
+        self._schedule_auto_refresh()
 
     def _configure_style(self) -> None:
         default_font = tkfont.nametofont("TkDefaultFont")
@@ -2344,6 +2347,9 @@ class StockPriceApp(tk.Tk):
         if self._queue_after_id is not None:
             self.after_cancel(self._queue_after_id)
             self._queue_after_id = None
+        if self._auto_refresh_after_id is not None:
+            self.after_cancel(self._auto_refresh_after_id)
+            self._auto_refresh_after_id = None
         if self._layout_after_id is not None:
             self.after_cancel(self._layout_after_id)
             self._layout_after_id = None
@@ -2568,6 +2574,21 @@ class StockPriceApp(tk.Tk):
         if not self.symbols:
             messagebox.showinfo("列表为空", "请先添加至少一个股票代码。", parent=self)
             self.code_entry.focus_set()
+            return
+        self._start_refresh(list(self.symbols.values()))
+
+    def _schedule_auto_refresh(self) -> None:
+        if self._auto_refresh_after_id is not None:
+            self.after_cancel(self._auto_refresh_after_id)
+        self._auto_refresh_after_id = self.after(
+            AUTO_REFRESH_INTERVAL_MS,
+            self._run_auto_refresh,
+        )
+
+    def _run_auto_refresh(self) -> None:
+        self._auto_refresh_after_id = None
+        if not self.symbols:
+            self._schedule_auto_refresh()
             return
         self._start_refresh(list(self.symbols.values()))
 
@@ -3674,6 +3695,7 @@ class StockPriceApp(tk.Tk):
         self.status_var.set(
             f"已刷新 {count} 只股票 · {finished_at.strftime('%Y-%m-%d %H:%M:%S')}"
         )
+        self._schedule_auto_refresh()
         self._save_state()
         self.code_entry.focus_set()
         if self._selected_result is not None:
