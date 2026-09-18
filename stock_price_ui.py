@@ -1785,6 +1785,14 @@ class StockPriceApp(tk.Tk):
             self._on_market_tab_changed,
         )
 
+        self.latest_trade_var = tk.StringVar(value="")
+        self.latest_trade_label = ttk.Label(
+            outer,
+            textvariable=self.latest_trade_var,
+            anchor=tk.W,
+        )
+        self.latest_trade_label.pack(fill=tk.X, pady=(8, 0))
+
         self.status_var = tk.StringVar(value="请输入股票名称或代码，并从候选项中选择。")
 
         self.progress = ttk.Progressbar(outer, mode="indeterminate", length=160)
@@ -1869,6 +1877,40 @@ class StockPriceApp(tk.Tk):
             f"总收益率：{return_rate}"
         )
         self.market_summary_label.lift()
+        self._refresh_latest_trade_summary()
+
+    def _refresh_latest_trade_summary(self) -> None:
+        market = self._active_market()
+        latest_key: tuple[str, int] | None = None
+        latest_details: tuple[StockSymbol, TradeRecord, Decimal, int] | None = None
+        saved_order = 0
+        for symbol_key, symbol in self.symbols.items():
+            if symbol.market != market:
+                continue
+            for record in self.trades.get(symbol_key, []):
+                saved_order += 1
+                try:
+                    quantity = int(record.quantity)
+                    amount = Decimal(record.price) * Decimal(record.quantity)
+                except (ValueError, InvalidOperation):
+                    continue
+                record_key = (record.trade_date, saved_order)
+                if latest_key is None or record_key >= latest_key:
+                    latest_key = record_key
+                    latest_details = (symbol, record, amount, quantity)
+
+        if latest_details is None:
+            self.latest_trade_var.set("")
+            return
+
+        symbol, record, amount, quantity = latest_details
+        display_name = self.display_names.get(symbol.canonical, "").strip() or "--"
+        self.latest_trade_var.set(
+            f"{record.trade_date}    "
+            f"{symbol.canonical} / {display_name}    "
+            f"{quantity:,}股    "
+            f"{amount:,.2f} {symbol.default_currency}"
+        )
 
     def _tree_for_symbol(self, symbol: StockSymbol) -> ttk.Treeview:
         return self.trees[symbol.market]
