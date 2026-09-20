@@ -173,7 +173,8 @@ def _lock_main_window_controls(window: tk.Tk) -> None:
         widget_handle = window.winfo_id()
         top_level_handle = user32.GetParent(widget_handle) or widget_handle
         style = user32.GetWindowLongW(top_level_handle, -16)
-        style &= ~(0x00010000 | 0x00020000 | 0x00040000)
+        style |= 0x00020000
+        style &= ~(0x00010000 | 0x00040000)
         user32.SetWindowLongW(top_level_handle, -16, style)
         user32.SetWindowPos(
             top_level_handle,
