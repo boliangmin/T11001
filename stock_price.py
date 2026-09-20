@@ -16,16 +16,21 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Callable, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote as url_quote
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from xml.etree import ElementTree
 
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36"
+)
+ECB_DAILY_RATES_URL = (
+    "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
 )
 
 
@@ -42,6 +47,13 @@ def _configure_console_encoding() -> None:
 
 class QuoteError(RuntimeError):
     """某个行情源无法返回有效数据。"""
+
+
+@dataclass(frozen=True)
+class ExchangeRates:
+    rate_date: str
+    usd_to_cny: Decimal
+    hkd_to_cny: Decimal
 
 
 @dataclass(frozen=True)
@@ -173,6 +185,47 @@ def _fetch_bytes(
                 time.sleep(0.35 * (attempt + 1))
 
     raise QuoteError(f"网络请求失败：{last_error}")
+
+
+def parse_ecb_exchange_rates(payload: bytes) -> ExchangeRates:
+    """解析 ECB 的欧元基准日汇率，并换算为人民币交叉汇率。"""
+    try:
+        root = ElementTree.fromstring(payload)
+        rate_date = ""
+        rates: dict[str, Decimal] = {}
+        for element in root.iter():
+            raw_date = element.attrib.get("time")
+            if raw_date is not None:
+                rate_date = raw_date.strip()
+            currency = element.attrib.get("currency", "").strip().upper()
+            if currency in {"USD", "HKD", "CNY"}:
+                rates[currency] = Decimal(element.attrib["rate"].strip())
+    except (ElementTree.ParseError, InvalidOperation, KeyError, TypeError) as exc:
+        raise ValueError("欧洲央行汇率数据格式无效") from exc
+
+    if not rate_date or set(rates) != {"USD", "HKD", "CNY"}:
+        raise ValueError("欧洲央行汇率数据不完整")
+    if any(not value.is_finite() or value <= 0 for value in rates.values()):
+        raise ValueError("欧洲央行汇率数值无效")
+
+    return ExchangeRates(
+        rate_date=rate_date,
+        usd_to_cny=rates["CNY"] / rates["USD"],
+        hkd_to_cny=rates["CNY"] / rates["HKD"],
+    )
+
+
+def fetch_exchange_rates(timeout: float = 12.0) -> ExchangeRates:
+    """获取 ECB 每日参考汇率。该数据并非实时交易汇率。"""
+    request = Request(
+        ECB_DAILY_RATES_URL,
+        headers={"User-Agent": f"{USER_AGENT} StockPriceViewer/1.0"},
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return parse_ecb_exchange_rates(response.read())
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+        raise RuntimeError(f"欧洲央行汇率获取失败：{exc}") from exc
 
 
 def _to_float(value: object) -> float | None:

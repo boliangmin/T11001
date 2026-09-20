@@ -24,10 +24,12 @@ from tkinter import messagebox, ttk
 from tkinter import font as tkfont
 
 from stock_price import (
+    ExchangeRates,
     PriceQuote,
     StockSearchResult,
     StockSymbol,
     choose_freshest,
+    fetch_exchange_rates,
     fetch_quotes,
     normalize_symbol,
     search_stocks,
@@ -37,6 +39,7 @@ from stock_price import (
 PROVIDER_NAMES = ["yahoo", "tencent", "sina"]
 MARKET_ORDER = ("US", "HK")
 MARKET_TITLES = {"US": "美股", "HK": "港股"}
+STATISTICS_PAGE = "STATS"
 TABLE_COLUMNS = (
     "code",
     "name",
@@ -89,6 +92,12 @@ SELL_COLOR = "#059669"
 HIGH_RETURN_BACKGROUND = "#FEF3C7"
 HIGH_RETURN_THRESHOLD = Decimal("0.20")
 DIVIDER = "#D7E0EC"
+STATISTICS_BACKGROUND = "#F7F4EE"
+STATISTICS_CNY_CARD = "#F3E6D2"
+STATISTICS_CARD = "#FFFDFC"
+STATISTICS_BORDER = "#E4D8C7"
+STATISTICS_ACCENT = "#B78B58"
+STATISTICS_TEXT = "#2F2922"
 TRADE_COLUMNS = (
     "trade_date",
     "trade_type",
@@ -324,6 +333,29 @@ class TTradeSummary:
     realized_return: Decimal
     residual_record: TradeRecord | None
     record_count: int
+
+
+@dataclass(frozen=True)
+class MarketMetrics:
+    currency: str
+    has_records: bool
+    complete: bool
+    market_value: Decimal
+    profit: Decimal
+    return_rate: Decimal | None
+
+
+def _calculate_cny_total_market_value(
+    us_metrics: MarketMetrics,
+    hk_metrics: MarketMetrics,
+    rates: ExchangeRates | None,
+) -> Decimal | None:
+    if rates is None or not us_metrics.complete or not hk_metrics.complete:
+        return None
+    return (
+        us_metrics.market_value * rates.usd_to_cny
+        + hk_metrics.market_value * rates.hkd_to_cny
+    )
 
 
 class AlreadyRunningError(RuntimeError):
@@ -1593,9 +1625,14 @@ class StockPriceApp(tk.Tk):
         self.trade_column_widths = DEFAULT_TRADE_COLUMN_WIDTHS.copy()
         self.show_closed_positions = {market: True for market in MARKET_ORDER}
         self.current_prices: dict[str, tuple[Decimal, str]] = {}
+        self.exchange_rates: ExchangeRates | None = None
+        self.exchange_rate_warning = ""
+        self.last_refresh_time: datetime | None = None
         self._trade_windows: dict[str, StockTradeWindow] = {}
         self.trees: dict[str, ttk.Treeview] = {}
         self.market_pages: dict[str, ttk.Frame] = {}
+        self._last_active_market = MARKET_ORDER[0]
+        self.current_page = MARKET_ORDER[0]
         self._market_spacer_ids = {market: [] for market in MARKET_ORDER}
         self._market_cell_labels: dict[
             tuple[str, str], tk.Label
@@ -1621,7 +1658,7 @@ class StockPriceApp(tk.Tk):
         self._configure_style()
         self._build_ui()
         self._restore_state()
-        self._refresh_market_summary()
+        self._refresh_statistics_dashboard()
         self._schedule_market_cell_labels()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         _lock_main_window_controls(self)
@@ -1629,6 +1666,11 @@ class StockPriceApp(tk.Tk):
         self.update_idletasks()
         self._fit_market_columns_to_viewport()
         self._queue_after_id = self.after(100, self._process_result_queue)
+        if self._startup_refresh_after_id is None:
+            self._startup_refresh_after_id = self.after(
+                200,
+                lambda: self._refresh_restored_stocks(list(self.symbols.values())),
+            )
         self._schedule_auto_refresh()
 
     def _configure_style(self) -> None:
@@ -2004,38 +2046,220 @@ class StockPriceApp(tk.Tk):
             page.rowconfigure(0, weight=1)
             page.columnconfigure(0, weight=1)
 
-        self.market_summary_var = tk.StringVar(
-            value="美股总市值：--    总盈亏：--    总收益率：--"
-        )
-        self.market_summary_label = ttk.Label(
+        self.statistics_page = tk.Frame(
             self.table_frame,
-            textvariable=self.market_summary_var,
-            font=("Microsoft YaHei UI", 11, "bold"),
+            background=STATISTICS_BACKGROUND,
         )
-        self.market_summary_label.place(
-            x=180,
-            y=22,
-            anchor=tk.W,
-        )
-        self.market_summary_label.lift()
+        self.table_frame.add(self.statistics_page, text="统计")
+        self._build_statistics_dashboard()
 
         self.table_frame.bind(
             "<<NotebookTabChanged>>",
             self._on_market_tab_changed,
         )
 
-        self.latest_trade_var = tk.StringVar(value="")
-        self.latest_trade_label = ttk.Label(
-            outer,
-            textvariable=self.latest_trade_var,
-            anchor=tk.E,
-        )
-        self.latest_trade_label.pack(fill=tk.X, pady=(8, 0))
-
         self.status_var = tk.StringVar(value="请输入股票名称或代码，并从候选项中选择。")
 
         self.progress = ttk.Progressbar(outer, mode="indeterminate", length=160)
         self.code_entry.focus_set()
+
+    @staticmethod
+    def _create_statistics_card(
+        parent: tk.Misc,
+        background: str,
+    ) -> tuple[tk.Frame, tk.Frame]:
+        border = tk.Frame(parent, background=STATISTICS_BORDER, padx=1, pady=1)
+        content = tk.Frame(border, background=background)
+        content.pack(fill=tk.BOTH, expand=True)
+        return border, content
+
+    def _build_statistics_dashboard(self) -> None:
+        page = self.statistics_page
+        content = tk.Frame(page, background=STATISTICS_BACKGROUND)
+        content.pack(fill=tk.BOTH, expand=True, padx=18, pady=14)
+        content.columnconfigure(0, weight=1, uniform="statistics")
+        content.columnconfigure(1, weight=1, uniform="statistics")
+        content.rowconfigure(3, weight=1)
+
+        header = tk.Frame(content, background=STATISTICS_BACKGROUND)
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        header.columnconfigure(0, weight=1)
+        tk.Label(
+            header,
+            text="资产统计",
+            background=STATISTICS_BACKGROUND,
+            foreground=STATISTICS_TEXT,
+            font=("Microsoft YaHei UI", 17, "bold"),
+        ).grid(row=0, column=0, rowspan=2, sticky="w")
+        self.statistics_refresh_time_var = tk.StringVar(value="统一刷新时间  --")
+        tk.Label(
+            header,
+            textvariable=self.statistics_refresh_time_var,
+            background=STATISTICS_BACKGROUND,
+            foreground=STATISTICS_TEXT,
+            font=("Microsoft YaHei UI", 9),
+        ).grid(row=0, column=1, sticky="e")
+        self.statistics_warning_var = tk.StringVar(value="")
+        tk.Label(
+            header,
+            textvariable=self.statistics_warning_var,
+            background=STATISTICS_BACKGROUND,
+            foreground="#8A5A23",
+            font=("Microsoft YaHei UI", 9),
+        ).grid(row=1, column=1, sticky="e")
+
+        cny_border, cny_card = self._create_statistics_card(
+            content,
+            STATISTICS_CNY_CARD,
+        )
+        cny_border.grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="nsew",
+            pady=(0, 10),
+        )
+        cny_card.columnconfigure(0, weight=1)
+        tk.Label(
+            cny_card,
+            text="人民币总市值",
+            background=STATISTICS_CNY_CARD,
+            foreground=STATISTICS_TEXT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=18, pady=(12, 0))
+        self.statistics_cny_total_var = tk.StringVar(value="--")
+        tk.Label(
+            cny_card,
+            textvariable=self.statistics_cny_total_var,
+            background=STATISTICS_CNY_CARD,
+            foreground=STATISTICS_TEXT,
+            font=("Microsoft YaHei UI", 22, "bold"),
+        ).grid(row=1, column=0, sticky="w", padx=18, pady=(0, 12))
+
+        self.statistics_usd_rate_var = tk.StringVar(value="1 USD = -- CNY")
+        self.statistics_hkd_rate_var = tk.StringVar(value="1 HKD = -- CNY")
+        self.statistics_rate_date_var = tk.StringVar(value="ECB 参考日期  --")
+        rate_specs = (
+            (0, "美元兑人民币", self.statistics_usd_rate_var),
+            (1, "港币兑人民币", self.statistics_hkd_rate_var),
+        )
+        for column, title, value_var in rate_specs:
+            border, card = self._create_statistics_card(content, STATISTICS_CARD)
+            border.grid(
+                row=2,
+                column=column,
+                sticky="nsew",
+                padx=(0, 5) if column == 0 else (5, 0),
+                pady=(0, 10),
+            )
+            card.columnconfigure(0, weight=1)
+            tk.Label(
+                card,
+                text=title,
+                background=STATISTICS_CARD,
+                foreground=STATISTICS_ACCENT,
+                font=("Microsoft YaHei UI", 10, "bold"),
+            ).grid(row=0, column=0, sticky="w", padx=16, pady=(10, 0))
+            tk.Label(
+                card,
+                textvariable=value_var,
+                background=STATISTICS_CARD,
+                foreground=STATISTICS_TEXT,
+                font=("Microsoft YaHei UI", 15, "bold"),
+            ).grid(row=1, column=0, sticky="w", padx=16)
+            tk.Label(
+                card,
+                textvariable=self.statistics_rate_date_var,
+                background=STATISTICS_CARD,
+                foreground=STATISTICS_TEXT,
+                font=("Microsoft YaHei UI", 8),
+            ).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 9))
+
+        self.statistics_market_value_vars: dict[str, tk.StringVar] = {}
+        self.statistics_profit_vars: dict[str, tk.StringVar] = {}
+        self.statistics_return_vars: dict[str, tk.StringVar] = {}
+        self.statistics_latest_trade_vars: dict[str, tk.StringVar] = {}
+        self.statistics_profit_labels: dict[str, tk.Label] = {}
+        self.statistics_return_labels: dict[str, tk.Label] = {}
+        for column, market in enumerate(MARKET_ORDER):
+            border, card = self._create_statistics_card(content, STATISTICS_CARD)
+            border.grid(
+                row=3,
+                column=column,
+                sticky="nsew",
+                padx=(0, 5) if column == 0 else (5, 0),
+            )
+            for metric_column in range(3):
+                card.columnconfigure(metric_column, weight=1, uniform=f"{market}-metric")
+            card.rowconfigure(4, weight=1)
+            tk.Label(
+                card,
+                text=MARKET_TITLES[market],
+                background=STATISTICS_CARD,
+                foreground=STATISTICS_TEXT,
+                font=("Microsoft YaHei UI", 13, "bold"),
+            ).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(13, 9))
+
+            self.statistics_market_value_vars[market] = tk.StringVar(value="--")
+            self.statistics_profit_vars[market] = tk.StringVar(value="--")
+            self.statistics_return_vars[market] = tk.StringVar(value="--")
+            metric_specs = (
+                ("总市值", self.statistics_market_value_vars[market]),
+                ("总盈亏", self.statistics_profit_vars[market]),
+                ("总收益率", self.statistics_return_vars[market]),
+            )
+            for metric_column, (title, value_var) in enumerate(metric_specs):
+                tk.Label(
+                    card,
+                    text=title,
+                    background=STATISTICS_CARD,
+                    foreground=STATISTICS_ACCENT,
+                    font=("Microsoft YaHei UI", 9),
+                ).grid(row=1, column=metric_column, sticky="w", padx=(16, 4))
+                value_label = tk.Label(
+                    card,
+                    textvariable=value_var,
+                    background=STATISTICS_CARD,
+                    foreground=STATISTICS_TEXT,
+                    font=("Microsoft YaHei UI", 11, "bold"),
+                )
+                value_label.grid(
+                    row=2,
+                    column=metric_column,
+                    sticky="w",
+                    padx=(16, 4),
+                    pady=(1, 12),
+                )
+                if metric_column == 1:
+                    self.statistics_profit_labels[market] = value_label
+                elif metric_column == 2:
+                    self.statistics_return_labels[market] = value_label
+
+            tk.Frame(card, background=STATISTICS_BORDER, height=1).grid(
+                row=3,
+                column=0,
+                columnspan=3,
+                sticky="ew",
+                padx=16,
+            )
+            self.statistics_latest_trade_vars[market] = tk.StringVar(value="--")
+            tk.Label(
+                card,
+                textvariable=self.statistics_latest_trade_vars[market],
+                background=STATISTICS_CARD,
+                foreground=STATISTICS_TEXT,
+                justify=tk.LEFT,
+                anchor=tk.NW,
+                wraplength=510,
+                font=("Microsoft YaHei UI", 10),
+            ).grid(
+                row=4,
+                column=0,
+                columnspan=3,
+                sticky="nsew",
+                padx=16,
+                pady=13,
+            )
 
     def _restore_geometry(self, _geometry: object) -> bool:
         self.geometry(f"{MAIN_WINDOW_SIZE[0]}x{MAIN_WINDOW_SIZE[1]}")
@@ -2074,44 +2298,54 @@ class StockPriceApp(tk.Tk):
         finally:
             lock_handle.close()
 
-    def _active_market(self) -> str:
+    def _active_page(self) -> str:
         selected_page = self.table_frame.select()
         for market, page in self.market_pages.items():
             if str(page) == selected_page:
+                self.current_page = market
+                self._last_active_market = market
                 return market
-        return MARKET_ORDER[0]
+        if str(self.statistics_page) == selected_page:
+            self.current_page = STATISTICS_PAGE
+            return STATISTICS_PAGE
+        return self.current_page
+
+    def _active_market(self) -> str:
+        active_page = self._active_page()
+        if active_page in MARKET_ORDER:
+            self._last_active_market = active_page
+        return self._last_active_market
 
     def _active_tree(self) -> ttk.Treeview:
         return self.trees[self._active_market()]
 
     def _select_market(self, market: str) -> None:
-        page = self.market_pages.get(market)
-        if page is not None:
-            self.table_frame.select(page)
-            self._refresh_market_summary()
+        self._select_page(market)
+
+    def _select_page(self, page_name: str) -> None:
+        if page_name in self.market_pages:
+            self._last_active_market = page_name
+            page: tk.Misc = self.market_pages[page_name]
+        elif page_name == STATISTICS_PAGE:
+            page = self.statistics_page
+        else:
+            return
+        self.current_page = page_name
+        self.table_frame.select(page)
+        self._refresh_statistics_dashboard()
 
     def _on_market_tab_changed(
         self,
         _event: tk.Event | None = None,
     ) -> None:
-        self._refresh_market_summary()
+        self._active_page()
+        self._refresh_statistics_dashboard()
         self._schedule_market_cell_labels()
 
-    def _refresh_market_summary(self) -> None:
-        market = self._active_market()
-        market_value, profit, return_rate = self._calculate_market_metrics(
-            market
-        )
-        self.market_summary_var.set(
-            f"{MARKET_TITLES[market]}总市值：{market_value}    "
-            f"总盈亏：{profit}    "
-            f"总收益率：{return_rate}"
-        )
-        self.market_summary_label.lift()
-        self._refresh_latest_trade_summary()
-
-    def _refresh_latest_trade_summary(self) -> None:
-        market = self._active_market()
+    def _latest_market_trade(
+        self,
+        market: str,
+    ) -> tuple[StockSymbol, TradeRecord, Decimal, int] | None:
         latest_key: tuple[str, int] | None = None
         latest_details: tuple[StockSymbol, TradeRecord, Decimal, int] | None = None
         saved_order = 0
@@ -2129,18 +2363,84 @@ class StockPriceApp(tk.Tk):
                 if latest_key is None or record_key >= latest_key:
                     latest_key = record_key
                     latest_details = (symbol, record, amount, quantity)
+        return latest_details
 
-        if latest_details is None:
-            self.latest_trade_var.set("")
-            return
+    def _refresh_statistics_dashboard(self) -> None:
+        metrics_by_market = {
+            market: self._calculate_market_metrics(market)
+            for market in MARKET_ORDER
+        }
+        for market, metrics in metrics_by_market.items():
+            if not metrics.has_records or not metrics.complete:
+                market_value_text = "--"
+                profit_text = "--"
+                return_text = "--"
+            else:
+                market_value_text = (
+                    f"{metrics.market_value:,.2f} {metrics.currency}"
+                )
+                profit_text = f"{metrics.profit:+,.2f} {metrics.currency}"
+                return_text = (
+                    "--"
+                    if metrics.return_rate is None
+                    else f"{metrics.return_rate * Decimal('100'):+.2f}%"
+                )
+            self.statistics_market_value_vars[market].set(market_value_text)
+            self.statistics_profit_vars[market].set(profit_text)
+            self.statistics_return_vars[market].set(return_text)
+            self.statistics_profit_labels[market].configure(
+                foreground=_metric_color(profit_text)
+            )
+            self.statistics_return_labels[market].configure(
+                foreground=_metric_color(return_text)
+            )
 
-        symbol, record, amount, quantity = latest_details
-        display_name = self.display_names.get(symbol.canonical, "").strip() or "--"
-        self.latest_trade_var.set(
-            f"{record.trade_date}    "
-            f"{symbol.canonical} / {display_name}    "
-            f"{quantity:,}股    "
-            f"{amount:,.2f} {symbol.default_currency}"
+            latest_details = self._latest_market_trade(market)
+            if latest_details is None:
+                latest_text = "--"
+            else:
+                symbol, record, amount, quantity = latest_details
+                display_name = (
+                    self.display_names.get(symbol.canonical, "").strip() or "--"
+                )
+                latest_text = (
+                    f"{record.trade_date}    "
+                    f"{symbol.canonical} / {display_name}    "
+                    f"{quantity:,}股    "
+                    f"{amount:,.2f} {symbol.default_currency}"
+                )
+            self.statistics_latest_trade_vars[market].set(latest_text)
+
+        rates = self.exchange_rates
+        if rates is None:
+            self.statistics_usd_rate_var.set("1 USD = -- CNY")
+            self.statistics_hkd_rate_var.set("1 HKD = -- CNY")
+            self.statistics_rate_date_var.set("ECB 参考日期  --")
+        else:
+            self.statistics_usd_rate_var.set(
+                f"1 USD = {rates.usd_to_cny:.4f} CNY"
+            )
+            self.statistics_hkd_rate_var.set(
+                f"1 HKD = {rates.hkd_to_cny:.4f} CNY"
+            )
+            self.statistics_rate_date_var.set(
+                f"ECB 参考日期  {rates.rate_date}"
+            )
+
+        cny_total = _calculate_cny_total_market_value(
+            metrics_by_market["US"],
+            metrics_by_market["HK"],
+            rates,
+        )
+        self.statistics_cny_total_var.set(
+            "--" if cny_total is None else f"{cny_total:,.2f} CNY"
+        )
+        self.statistics_warning_var.set(self.exchange_rate_warning)
+        self.statistics_refresh_time_var.set(
+            "统一刷新时间  --"
+            if self.last_refresh_time is None
+            else "统一刷新时间  "
+            f"{self.last_refresh_time.strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
     def _tree_for_symbol(self, symbol: StockSymbol) -> ttk.Treeview:
@@ -2467,9 +2767,12 @@ class StockPriceApp(tk.Tk):
 
             active_market = str(payload.get("active_market") or "")
             if active_market not in self.market_pages:
-                active_market = first_restored_market
-            if active_market:
-                self._select_market(active_market)
+                active_market = first_restored_market or MARKET_ORDER[0]
+            self._last_active_market = active_market
+            active_page = str(payload.get("active_page") or active_market)
+            if active_page not in {*MARKET_ORDER, STATISTICS_PAGE}:
+                active_page = active_market
+            self._select_page(active_page)
 
             if restored_count:
                 self.status_var.set(
@@ -2486,6 +2789,7 @@ class StockPriceApp(tk.Tk):
             self.status_var.set(f"未能恢复上次保存内容：{exc}")
 
     def _save_state(self) -> bool:
+        active_page = self._active_page()
         layout_tree = self._active_tree()
         payload = {
             "version": STATE_VERSION,
@@ -2502,6 +2806,7 @@ class StockPriceApp(tk.Tk):
             ),
             "trade_column_widths": self.trade_column_widths.copy(),
             "active_market": self._active_market(),
+            "active_page": active_page,
             "show_closed_positions": self.show_closed_positions.copy(),
             "stocks": [],
             "trades": {
@@ -2797,10 +3102,6 @@ class StockPriceApp(tk.Tk):
         self._start_refresh([symbol])
 
     def refresh_all(self) -> None:
-        if not self.symbols:
-            messagebox.showinfo("列表为空", "请先添加至少一个股票代码。", parent=self)
-            self.code_entry.focus_set()
-            return
         self._start_refresh(list(self.symbols.values()))
 
     def _schedule_auto_refresh(self) -> None:
@@ -2813,9 +3114,6 @@ class StockPriceApp(tk.Tk):
 
     def _run_auto_refresh(self) -> None:
         self._auto_refresh_after_id = None
-        if not self.symbols:
-            self._schedule_auto_refresh()
-            return
         self._start_refresh(list(self.symbols.values()))
 
     def _clear_selection_on_blank(self, event: tk.Event) -> str | None:
@@ -3517,7 +3815,7 @@ class StockPriceApp(tk.Tk):
             self.current_prices.pop(item_id, None)
         self._schedule_market_cell_labels()
         self._update_market_spacers(market)
-        self._refresh_market_summary()
+        self._refresh_statistics_dashboard()
         self._save_state()
         self.status_var.set(f"列表中共有 {len(self.symbols)} 只股票。")
 
@@ -3588,7 +3886,7 @@ class StockPriceApp(tk.Tk):
     def _calculate_market_metrics(
         self,
         market: str,
-    ) -> tuple[str, str, str]:
+    ) -> MarketMetrics:
         currency = "USD" if market == "US" else "HKD"
         total_market_value = Decimal("0")
         total_buy_cost = Decimal("0")
@@ -3606,7 +3904,14 @@ class StockPriceApp(tk.Tk):
 
                 current_quote = self.current_prices.get(symbol.canonical)
                 if current_quote is None or current_quote[1] != currency:
-                    return "--", "--", "--"
+                    return MarketMetrics(
+                        currency=currency,
+                        has_records=True,
+                        complete=False,
+                        market_value=Decimal("0"),
+                        profit=Decimal("0"),
+                        return_rate=None,
+                    )
 
                 buy_cost = Decimal("0")
                 sell_proceeds = Decimal("0")
@@ -3631,19 +3936,25 @@ class StockPriceApp(tk.Tk):
                     - buy_cost
                 )
         except InvalidOperation:
-            return "--", "--", "--"
+            return MarketMetrics(
+                currency=currency,
+                has_records=has_records,
+                complete=False,
+                market_value=Decimal("0"),
+                profit=Decimal("0"),
+                return_rate=None,
+            )
 
-        if not has_records:
-            return "--", "--", "--"
-
-        market_value_text = f"{total_market_value:,.2f} {currency}"
-        profit_text = f"{total_profit:+,.2f} {currency}"
-        return_text = (
-            "--"
-            if total_buy_cost <= 0
-            else f"{total_profit / total_buy_cost * Decimal('100'):+.2f}%"
+        return MarketMetrics(
+            currency=currency,
+            has_records=has_records,
+            complete=True,
+            market_value=total_market_value,
+            profit=total_profit,
+            return_rate=(
+                None if total_buy_cost <= 0 else total_profit / total_buy_cost
+            ),
         )
-        return market_value_text, profit_text, return_text
 
     def _calculate_position_metrics(
         self,
@@ -3765,7 +4076,7 @@ class StockPriceApp(tk.Tk):
         )
         tree.item(symbol.canonical, values=current)
         self._apply_closed_position_visibility(symbol.market)
-        self._refresh_market_summary()
+        self._refresh_statistics_dashboard()
         trade_window = self._trade_windows.get(symbol.canonical)
         if trade_window is not None and trade_window.winfo_exists():
             trade_window.refresh_summary()
@@ -3779,7 +4090,9 @@ class StockPriceApp(tk.Tk):
         self.refresh_button.configure(state=tk.DISABLED)
         self.progress.pack(fill=tk.X, pady=(8, 0))
         self.progress.start(12)
-        self.status_var.set(f"正在刷新 {len(symbols)} 只股票……")
+        self.status_var.set(
+            f"正在刷新 {len(symbols)} 只股票并更新汇率……"
+        )
 
         worker = threading.Thread(
             target=self._refresh_worker,
@@ -3789,6 +4102,11 @@ class StockPriceApp(tk.Tk):
         worker.start()
 
     def _refresh_worker(self, symbols: list[StockSymbol]) -> None:
+        try:
+            rates = fetch_exchange_rates(timeout=12.0)
+            self._result_queue.put(("exchange_rates", rates))
+        except Exception as exc:
+            self._result_queue.put(("exchange_rate_error", str(exc)))
         for symbol in symbols:
             try:
                 quotes, errors = fetch_quotes(symbol, PROVIDER_NAMES, timeout=12.0)
@@ -3808,6 +4126,18 @@ class StockPriceApp(tk.Tk):
                 elif kind == "error":
                     _, symbol, error = message
                     self._show_row_error(symbol, error)
+                elif kind == "exchange_rates":
+                    _, rates = message
+                    self.exchange_rates = rates
+                    self.exchange_rate_warning = ""
+                    self._refresh_statistics_dashboard()
+                elif kind == "exchange_rate_error":
+                    self.exchange_rate_warning = (
+                        "汇率刷新失败，沿用上次成功值"
+                        if self.exchange_rates is not None
+                        else "汇率刷新失败，暂无可用汇率"
+                    )
+                    self._refresh_statistics_dashboard()
                 elif kind == "search":
                     _, generation, query, results, errors = message
                     self._show_search_results(
@@ -3895,7 +4225,7 @@ class StockPriceApp(tk.Tk):
             tags=(tag,) if tag else (),
         )
         self._schedule_market_cell_labels()
-        self._refresh_market_summary()
+        self._refresh_statistics_dashboard()
         trade_window = self._trade_windows.get(symbol.canonical)
         if trade_window is not None and trade_window.winfo_exists():
             trade_window.refresh_summary()
@@ -3909,18 +4239,20 @@ class StockPriceApp(tk.Tk):
         if len(current) == len(TABLE_COLUMNS) and current[2] == "--":
             tree.item(symbol.canonical, values=current, tags=("waiting",))
         self._schedule_market_cell_labels()
-        self._refresh_market_summary()
+        self._refresh_statistics_dashboard()
         self._save_state()
         self.status_var.set(f"{symbol.canonical} 行情获取失败：{error[:100]}")
 
     def _finish_refresh(self, count: int, finished_at: datetime) -> None:
         self._refreshing = False
+        self.last_refresh_time = finished_at
         self.progress.stop()
         self.progress.pack_forget()
         self.refresh_button.configure(state=tk.NORMAL)
         self.status_var.set(
             f"已刷新 {count} 只股票 · {finished_at.strftime('%Y-%m-%d %H:%M:%S')}"
         )
+        self._refresh_statistics_dashboard()
         self._schedule_auto_refresh()
         self._save_state()
         self.code_entry.focus_set()
