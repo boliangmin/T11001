@@ -68,6 +68,8 @@ DEFAULT_COLUMN_WIDTHS = {
     "profit": 125,
     "return": 95,
 }
+MAIN_WINDOW_SIZE = (1256, 768)
+MIN_MARKET_COLUMN_WIDTH = 60
 MARKET_ROW_HEIGHT = 32
 MARKET_SPACER_PREFIX = "__market_spacer__"
 APP_BACKGROUND = "#F4F7FB"
@@ -119,11 +121,6 @@ STATE_VERSION = 4
 AUTO_REFRESH_INTERVAL_MS = 5 * 60 * 1000
 APP_ICON_FILENAME = "trade_view.ico"
 WINDOWS_APP_USER_MODEL_ID = "Blmcc.TradeView.1.0"
-WINDOW_GEOMETRY_PATTERN = re.compile(
-    r"^(?P<width>\d+)x(?P<height>\d+)(?P<x>[+-]\d+)(?P<y>[+-]\d+)$"
-)
-
-
 def _resource_path(filename: str) -> Path:
     candidates: list[Path] = []
     bundle_directory = getattr(sys, "_MEIPASS", None)
@@ -162,6 +159,77 @@ def _apply_window_icon(window: tk.Misc) -> None:
         window.iconbitmap(str(icon_path))
     except (OSError, tk.TclError):
         pass
+
+
+def _lock_main_window_controls(window: tk.Tk) -> None:
+    window.resizable(False, False)
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        window.update_idletasks()
+        user32 = ctypes.windll.user32
+        widget_handle = window.winfo_id()
+        top_level_handle = user32.GetParent(widget_handle) or widget_handle
+        style = user32.GetWindowLongW(top_level_handle, -16)
+        style &= ~(0x00010000 | 0x00020000 | 0x00040000)
+        user32.SetWindowLongW(top_level_handle, -16, style)
+        user32.SetWindowPos(
+            top_level_handle,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020,
+        )
+    except (AttributeError, OSError, tk.TclError):
+        pass
+
+
+def _fit_column_widths_to_total(
+    widths: dict[str, int],
+    target_total: int,
+) -> dict[str, int]:
+    fitted = {
+        column: max(MIN_MARKET_COLUMN_WIDTH, int(widths[column]))
+        for column in TABLE_COLUMNS
+    }
+    current_total = sum(fitted.values())
+    minimum_total = MIN_MARKET_COLUMN_WIDTH * len(TABLE_COLUMNS)
+    target_total = max(minimum_total, int(target_total))
+    if current_total <= target_total:
+        return fitted
+
+    available_extra = target_total - minimum_total
+    original_extra = {
+        column: fitted[column] - MIN_MARKET_COLUMN_WIDTH
+        for column in TABLE_COLUMNS
+    }
+    original_extra_total = sum(original_extra.values())
+    if original_extra_total <= 0:
+        return fitted
+
+    scaled_extra = {
+        column: original_extra[column] * available_extra / original_extra_total
+        for column in TABLE_COLUMNS
+    }
+    allocated_extra = {
+        column: int(scaled_extra[column]) for column in TABLE_COLUMNS
+    }
+    remainder = available_extra - sum(allocated_extra.values())
+    for column in sorted(
+        TABLE_COLUMNS,
+        key=lambda item: scaled_extra[item] - allocated_extra[item],
+        reverse=True,
+    )[:remainder]:
+        allocated_extra[column] += 1
+
+    return {
+        column: MIN_MARKET_COLUMN_WIDTH + allocated_extra[column]
+        for column in TABLE_COLUMNS
+    }
 
 
 def _default_state_path() -> Path:
@@ -1410,8 +1478,10 @@ class StockPriceApp(tk.Tk):
         self.withdraw()
         self.configure(background=APP_BACKGROUND)
         self.title("我钱呢")
-        self.geometry("1050x600")
-        self.minsize(820, 430)
+        self.geometry(f"{MAIN_WINDOW_SIZE[0]}x{MAIN_WINDOW_SIZE[1]}")
+        self.minsize(*MAIN_WINDOW_SIZE)
+        self.maxsize(*MAIN_WINDOW_SIZE)
+        self.resizable(False, False)
 
         self._state_path = state_path or _default_state_path()
         self._state_lock_handle = None
@@ -1463,7 +1533,10 @@ class StockPriceApp(tk.Tk):
         self._refresh_market_summary()
         self._schedule_market_cell_labels()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        _lock_main_window_controls(self)
         _center_and_show(self, fit_content=False)
+        self.update_idletasks()
+        self._fit_market_columns_to_viewport()
         self._queue_after_id = self.after(100, self._process_result_queue)
         self._schedule_auto_refresh()
 
@@ -1873,16 +1946,8 @@ class StockPriceApp(tk.Tk):
         self.progress = ttk.Progressbar(outer, mode="indeterminate", length=160)
         self.code_entry.focus_set()
 
-    def _restore_geometry(self, geometry: object) -> bool:
-        match = WINDOW_GEOMETRY_PATTERN.fullmatch(str(geometry))
-        if match is None:
-            return False
-
-        screen_width = self.winfo_screenwidth()
-        screen_height = self.winfo_screenheight()
-        width = max(820, min(int(match.group("width")), screen_width))
-        height = max(430, min(int(match.group("height")), screen_height))
-        self.geometry(f"{width}x{height}")
+    def _restore_geometry(self, _geometry: object) -> bool:
+        self.geometry(f"{MAIN_WINDOW_SIZE[0]}x{MAIN_WINDOW_SIZE[1]}")
         return True
 
     def _acquire_state_lock(self) -> bool:
@@ -2002,6 +2067,24 @@ class StockPriceApp(tk.Tk):
             for column, width in widths.items():
                 if column in tree["columns"]:
                     tree.column(column, width=width)
+        self._schedule_market_cell_labels()
+
+    def _fit_market_columns_to_viewport(self) -> None:
+        for tree in self.trees.values():
+            visible_width = max(
+                MIN_MARKET_COLUMN_WIDTH * len(TABLE_COLUMNS),
+                tree.winfo_width() - 2,
+            )
+            current_widths = {
+                column: int(tree.column(column, "width"))
+                for column in TABLE_COLUMNS
+            }
+            fitted_widths = _fit_column_widths_to_total(
+                current_widths,
+                visible_width,
+            )
+            for column, width in fitted_widths.items():
+                tree.column(column, width=width)
         self._schedule_market_cell_labels()
 
     def _capture_trade_window_layout(self, window: StockTradeWindow) -> None:
@@ -2316,7 +2399,9 @@ class StockPriceApp(tk.Tk):
         payload = {
             "version": STATE_VERSION,
             "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-            "window_geometry": f"{self.winfo_width()}x{self.winfo_height()}+0+0",
+            "window_geometry": (
+                f"{MAIN_WINDOW_SIZE[0]}x{MAIN_WINDOW_SIZE[1]}+0+0"
+            ),
             "column_widths": {
                 column: int(layout_tree.column(column, "width"))
                 for column in TABLE_COLUMNS
