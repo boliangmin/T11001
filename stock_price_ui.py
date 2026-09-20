@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import calendar
+import hashlib
+import hmac
 import json
 import msvcrt
 import os
@@ -69,6 +71,7 @@ DEFAULT_COLUMN_WIDTHS = {
     "return": 95,
 }
 MAIN_WINDOW_SIZE = (1256, 768)
+PASSWORD_WINDOW_SIZE = (380, 210)
 MIN_MARKET_COLUMN_WIDTH = 60
 MARKET_ROW_HEIGHT = 32
 MARKET_SPACER_PREFIX = "__market_spacer__"
@@ -121,6 +124,23 @@ STATE_VERSION = 4
 AUTO_REFRESH_INTERVAL_MS = 5 * 60 * 1000
 APP_ICON_FILENAME = "trade_view.ico"
 WINDOWS_APP_USER_MODEL_ID = "Blmcc.TradeView.1.0"
+PASSWORD_HASH_ITERATIONS = 310_000
+PASSWORD_HASH_SALT = bytes.fromhex("9f3b7d2c4a8165e0b1d6c8f2047a9e35")
+PASSWORD_HASH_DIGEST = bytes.fromhex(
+    "5943ce25a58ba7a6b4a0a555a2b9035736cc74f62bc414c60eea897b8d8e7259"
+)
+
+
+def _verify_password(password: str) -> bool:
+    candidate = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        PASSWORD_HASH_SALT,
+        PASSWORD_HASH_ITERATIONS,
+    )
+    return hmac.compare_digest(candidate, PASSWORD_HASH_DIGEST)
+
+
 def _resource_path(filename: str) -> Path:
     candidates: list[Path] = []
     bundle_directory = getattr(sys, "_MEIPASS", None)
@@ -308,6 +328,76 @@ class TTradeSummary:
 
 class AlreadyRunningError(RuntimeError):
     """同一份本地状态文件已经由另一个窗口占用。"""
+
+
+class PasswordDialog(tk.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.withdraw()
+        _apply_window_icon(self)
+        self.title("我钱呢")
+        self.configure(background=APP_BACKGROUND)
+        self.geometry(f"{PASSWORD_WINDOW_SIZE[0]}x{PASSWORD_WINDOW_SIZE[1]}")
+        self.resizable(False, False)
+        self.authenticated = False
+        self.password_var = tk.StringVar()
+        self.error_var = tk.StringVar()
+
+        content = tk.Frame(self, background=APP_BACKGROUND, padx=36, pady=28)
+        content.pack(fill=tk.BOTH, expand=True)
+        tk.Label(
+            content,
+            text="请输入密码",
+            background=APP_BACKGROUND,
+            foreground=TEXT_PRIMARY,
+            font=("Microsoft YaHei UI", 12, "bold"),
+        ).pack(anchor=tk.W)
+        self.password_entry = tk.Entry(
+            content,
+            textvariable=self.password_var,
+            show="*",
+            font=("Microsoft YaHei UI", 11),
+            relief=tk.SOLID,
+            borderwidth=1,
+        )
+        self.password_entry.pack(fill=tk.X, pady=(12, 6), ipady=7)
+        tk.Label(
+            content,
+            textvariable=self.error_var,
+            background=APP_BACKGROUND,
+            foreground=BUY_COLOR,
+            font=("Microsoft YaHei UI", 9),
+        ).pack(anchor=tk.W)
+        tk.Button(
+            content,
+            text="进入",
+            command=self._submit,
+            background=ACCENT,
+            foreground=SURFACE,
+            activebackground=ACCENT_HOVER,
+            activeforeground=SURFACE,
+            relief=tk.FLAT,
+            borderwidth=0,
+            font=("Microsoft YaHei UI", 10),
+            cursor="hand2",
+        ).pack(fill=tk.X, pady=(10, 0), ipady=6)
+        self.bind("<Return>", self._submit)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    def _submit(self, _event: tk.Event | None = None) -> None:
+        if _verify_password(self.password_var.get()):
+            self.authenticated = True
+            self.destroy()
+            return
+        self.error_var.set("密码错误")
+        self.password_var.set("")
+        self.password_entry.focus_set()
+
+    def run(self) -> bool:
+        _center_and_show(self, fit_content=False)
+        self.password_entry.focus_set()
+        self.mainloop()
+        return self.authenticated
 
 
 class CalendarPopup(tk.Toplevel):
@@ -3840,6 +3930,9 @@ class StockPriceApp(tk.Tk):
 
 def main() -> None:
     _configure_windows_app_identity()
+    password_dialog = PasswordDialog()
+    if not password_dialog.run():
+        return
     try:
         app = StockPriceApp()
     except AlreadyRunningError:
