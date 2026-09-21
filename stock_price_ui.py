@@ -1826,6 +1826,8 @@ class StockPriceApp(tk.Tk):
             foreground=TEXT_SECONDARY,
             padding=(16, 6),
             font=("Microsoft YaHei UI", 10),
+            # Hide the dotted focus rectangle without disabling tab focus.
+            focusthickness=0,
         )
         style.map(
             "TNotebook.Tab",
