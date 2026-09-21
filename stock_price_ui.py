@@ -2014,6 +2014,11 @@ class StockPriceApp(tk.Tk):
             )
             tree.bind(
                 "<Configure>",
+                self._fit_market_columns_to_viewport,
+                add="+",
+            )
+            tree.bind(
+                "<Configure>",
                 lambda event, target_market=market: (
                     self._update_market_spacers(target_market, event)
                 ),
@@ -2460,12 +2465,19 @@ class StockPriceApp(tk.Tk):
                     tree.column(column, width=width)
         self._schedule_market_cell_labels()
 
-    def _fit_market_columns_to_viewport(self) -> None:
+    def _fit_market_columns_to_viewport(
+        self,
+        event: tk.Event | None = None,
+    ) -> None:
         for tree in self.trees.values():
-            visible_width = max(
-                MIN_MARKET_COLUMN_WIDTH * len(TABLE_COLUMNS),
-                tree.winfo_width() - 2,
-            )
+            if event is not None and event.widget is not tree:
+                continue
+            visible_width = tree.winfo_width() - 2
+            # Inactive notebook pages have width 1 until first displayed. Do
+            # not replace restored widths using that placeholder geometry;
+            # their Configure event will fit them once the viewport is ready.
+            if visible_width < MIN_MARKET_COLUMN_WIDTH * len(TABLE_COLUMNS):
+                continue
             current_widths = {
                 column: int(tree.column(column, "width"))
                 for column in TABLE_COLUMNS
@@ -2475,7 +2487,8 @@ class StockPriceApp(tk.Tk):
                 visible_width,
             )
             for column, width in fitted_widths.items():
-                tree.column(column, width=width)
+                if width != current_widths[column]:
+                    tree.column(column, width=width)
         self._schedule_market_cell_labels()
 
     def _capture_trade_window_layout(self, window: StockTradeWindow) -> None:
