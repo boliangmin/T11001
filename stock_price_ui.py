@@ -2084,6 +2084,15 @@ class StockPriceApp(tk.Tk):
         self.table_frame.add(self.statistics_page, text="统计")
         self._build_statistics_dashboard()
 
+        self.market_summary_var = tk.StringVar(
+            value="美股总市值：--    总盈亏：--    总收益率：--"
+        )
+        self.market_summary_label = ttk.Label(
+            self.table_frame,
+            textvariable=self.market_summary_var,
+            font=("Microsoft YaHei UI", 11, "bold"),
+        )
+
         self.table_frame.bind(
             "<<NotebookTabChanged>>",
             self._on_market_tab_changed,
@@ -2396,26 +2405,49 @@ class StockPriceApp(tk.Tk):
                     latest_details = (symbol, record, amount, quantity)
         return latest_details
 
+    @staticmethod
+    def _format_market_metrics(
+        metrics: MarketMetrics,
+    ) -> tuple[str, str, str]:
+        if not metrics.has_records or not metrics.complete:
+            return "--", "--", "--"
+        market_value_text = f"{metrics.market_value:,.2f} {metrics.currency}"
+        profit_text = f"{metrics.profit:+,.2f} {metrics.currency}"
+        return_text = (
+            "--"
+            if metrics.return_rate is None
+            else f"{metrics.return_rate * Decimal('100'):+.2f}%"
+        )
+        return market_value_text, profit_text, return_text
+
+    def _refresh_market_summary(
+        self,
+        metrics_by_market: dict[str, MarketMetrics],
+    ) -> None:
+        page = self._active_page()
+        if page not in MARKET_ORDER:
+            self.market_summary_label.place_forget()
+            return
+        market_value, profit, return_rate = self._format_market_metrics(
+            metrics_by_market[page]
+        )
+        self.market_summary_var.set(
+            f"{MARKET_TITLES[page]}总市值：{market_value}    "
+            f"总盈亏：{profit}    "
+            f"总收益率：{return_rate}"
+        )
+        self.market_summary_label.place(x=260, y=22, anchor=tk.W)
+        self.market_summary_label.lift()
+
     def _refresh_statistics_dashboard(self) -> None:
         metrics_by_market = {
             market: self._calculate_market_metrics(market)
             for market in MARKET_ORDER
         }
         for market, metrics in metrics_by_market.items():
-            if not metrics.has_records or not metrics.complete:
-                market_value_text = "--"
-                profit_text = "--"
-                return_text = "--"
-            else:
-                market_value_text = (
-                    f"{metrics.market_value:,.2f} {metrics.currency}"
-                )
-                profit_text = f"{metrics.profit:+,.2f} {metrics.currency}"
-                return_text = (
-                    "--"
-                    if metrics.return_rate is None
-                    else f"{metrics.return_rate * Decimal('100'):+.2f}%"
-                )
+            market_value_text, profit_text, return_text = (
+                self._format_market_metrics(metrics)
+            )
             self.statistics_market_value_vars[market].set(market_value_text)
             self.statistics_profit_vars[market].set(profit_text)
             self.statistics_return_vars[market].set(return_text)
@@ -2473,6 +2505,7 @@ class StockPriceApp(tk.Tk):
             else "统一刷新时间  "
             f"{self.last_refresh_time.strftime('%Y-%m-%d %H:%M:%S')}"
         )
+        self._refresh_market_summary(metrics_by_market)
 
     def _tree_for_symbol(self, symbol: StockSymbol) -> ttk.Treeview:
         return self.trees[symbol.market]
