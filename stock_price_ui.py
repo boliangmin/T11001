@@ -2126,6 +2126,18 @@ class StockPriceApp(tk.Tk):
             self._on_market_tab_changed,
         )
 
+        self.latest_trade_var = tk.StringVar(value="")
+        self.latest_trade_label = ttk.Label(
+            outer,
+            textvariable=self.latest_trade_var,
+            anchor=tk.E,
+        )
+        self.latest_trade_label.pack(
+            fill=tk.X,
+            pady=(8, 0),
+            after=self.table_frame,
+        )
+
         self.status_var = tk.StringVar(value="请输入股票名称或代码，并从候选项中选择。")
 
         self.progress = ttk.Progressbar(outer, mode="indeterminate", length=160)
@@ -2433,6 +2445,19 @@ class StockPriceApp(tk.Tk):
                     latest_details = (symbol, record, amount, quantity)
         return latest_details
 
+    def _format_latest_market_trade(self, market: str) -> str:
+        latest_details = self._latest_market_trade(market)
+        if latest_details is None:
+            return ""
+        symbol, record, amount, quantity = latest_details
+        display_name = self.display_names.get(symbol.canonical, "").strip() or "--"
+        return (
+            f"{record.trade_date}    "
+            f"{symbol.canonical} / {display_name}    "
+            f"{quantity:,}股    "
+            f"{amount:,.2f} {symbol.default_currency}"
+        )
+
     @staticmethod
     def _format_market_metrics(
         metrics: MarketMetrics,
@@ -2455,6 +2480,8 @@ class StockPriceApp(tk.Tk):
         page = self._active_page()
         if page not in MARKET_ORDER:
             self.market_summary_label.place_forget()
+            self.latest_trade_var.set("")
+            self.latest_trade_label.pack_forget()
             return
         market_value, profit, return_rate = self._format_market_metrics(
             metrics_by_market[page]
@@ -2466,6 +2493,13 @@ class StockPriceApp(tk.Tk):
         )
         self.market_summary_label.place(x=260, y=22, anchor=tk.W)
         self.market_summary_label.lift()
+        self.latest_trade_var.set(self._format_latest_market_trade(page))
+        if not self.latest_trade_label.winfo_manager():
+            self.latest_trade_label.pack(
+                fill=tk.X,
+                pady=(8, 0),
+                after=self.table_frame,
+            )
 
     def _refresh_statistics_dashboard(self) -> None:
         metrics_by_market = {
@@ -2486,21 +2520,8 @@ class StockPriceApp(tk.Tk):
                 foreground=_metric_color(return_text)
             )
 
-            latest_details = self._latest_market_trade(market)
-            if latest_details is None:
-                latest_text = "--"
-            else:
-                symbol, record, amount, quantity = latest_details
-                display_name = (
-                    self.display_names.get(symbol.canonical, "").strip() or "--"
-                )
-                latest_text = (
-                    f"{record.trade_date}    "
-                    f"{symbol.canonical} / {display_name}    "
-                    f"{quantity:,}股    "
-                    f"{amount:,.2f} {symbol.default_currency}"
-                )
-            self.statistics_latest_trade_vars[market].set(latest_text)
+            latest_text = self._format_latest_market_trade(market)
+            self.statistics_latest_trade_vars[market].set(latest_text or "--")
 
         rates = self.exchange_rates
         if rates is None:
