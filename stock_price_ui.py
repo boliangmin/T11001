@@ -393,6 +393,7 @@ class PasswordDialog(tk.Tk):
             borderwidth=1,
         )
         self.password_entry.pack(fill=tk.X, pady=(12, 6), ipady=7)
+        self.password_entry.bind("<FocusIn>", self._use_english_input, add="+")
         tk.Label(
             content,
             textvariable=self.error_var,
@@ -416,6 +417,32 @@ class PasswordDialog(tk.Tk):
         self.bind("<Return>", self._submit)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
+    def _use_english_input(self, _event: tk.Event | None = None) -> None:
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            imm32 = ctypes.windll.imm32
+            user32.GetParent.argtypes = [wintypes.HWND]
+            user32.GetParent.restype = wintypes.HWND
+            imm32.ImmAssociateContextEx.argtypes = [
+                wintypes.HWND, wintypes.HANDLE, wintypes.DWORD
+            ]
+            imm32.ImmAssociateContextEx.restype = wintypes.BOOL
+
+            self.password_entry.winfo_id()
+            window_handle = self.winfo_id()
+            top_level_handle = user32.GetParent(window_handle) or window_handle
+            # Tk's native focus can stay on the top-level wrapper. Disable IME
+            # for this password window and its children, not the whole thread.
+            imm32.ImmAssociateContextEx(top_level_handle, None, 0)
+            imm32.ImmAssociateContextEx(top_level_handle, None, 0x0001)  # IACE_CHILDREN
+        except (AttributeError, OSError, tk.TclError):
+            pass
+
     def _submit(self, _event: tk.Event | None = None) -> None:
         if _verify_password(self.password_var.get()):
             self.authenticated = True
@@ -427,6 +454,7 @@ class PasswordDialog(tk.Tk):
 
     def run(self) -> bool:
         _center_and_show(self, fit_content=False)
+        self._use_english_input()
         self.password_entry.focus_set()
         self.mainloop()
         return self.authenticated
