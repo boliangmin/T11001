@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from tkinter import messagebox, ttk
 from tkinter import font as tkfont
@@ -318,6 +318,67 @@ class TradeRecord:
     price: str
     quantity: str
     trade_type: str
+
+
+CASH_FLOW_CURRENCIES = {"港币": "HKD", "美元": "USD"}
+
+
+@dataclass(frozen=True)
+class CashFlowRecord:
+    flow_date: str
+    flow_type: str
+    currency: str
+    exchange_rate: str
+    cny_amount: str
+
+    @classmethod
+    def from_values(
+        cls,
+        flow_date: str,
+        flow_type: str,
+        currency: str,
+        exchange_rate: str,
+        cny_amount: str,
+    ) -> CashFlowRecord:
+        if not all(isinstance(value, str) for value in (
+            flow_date, flow_type, currency, exchange_rate, cny_amount
+        )):
+            raise ValueError("出入金记录字段格式无效。")
+        try:
+            parsed_date = datetime.strptime(flow_date.strip(), "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise ValueError("请通过日历选择有效的日期。") from exc
+        if flow_type not in {"入金", "出金"}:
+            raise ValueError("请选择入金或出金。")
+        if currency not in CASH_FLOW_CURRENCIES.values():
+            raise ValueError("请选择港币或美元。")
+        normalized = []
+        for raw, label, places in (
+            (exchange_rate, "汇率", 8), (cny_amount, "人民币金额", 2)
+        ):
+            text = raw.strip().replace(",", "")
+            if not re.fullmatch(rf"[0-9]{{1,15}}(?:\.[0-9]{{1,{places}}})?", text):
+                raise ValueError(f"{label}须为正数，最多15位整数、{places}位小数。")
+            value = Decimal(text)
+            if value <= 0:
+                raise ValueError(f"{label}必须大于0。")
+            normalized.append(format(value, "f"))
+        return cls(parsed_date.isoformat(), flow_type, currency, *normalized)
+
+    @property
+    def foreign_amount(self) -> Decimal:
+        return (Decimal(self.cny_amount) / Decimal(self.exchange_rate)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+
+    def to_payload(self) -> dict[str, str]:
+        return {
+            "flow_date": self.flow_date,
+            "flow_type": self.flow_type,
+            "currency": self.currency,
+            "exchange_rate": self.exchange_rate,
+            "cny_amount": self.cny_amount,
+        }
 
 
 @dataclass(frozen=True)
@@ -1622,6 +1683,234 @@ class StockTradeWindow(tk.Toplevel):
         self.destroy()
 
 
+class CashFlowEntryDialog(tk.Toplevel):
+    def __init__(
+        self,
+        owner: CashFlowWindow,
+        on_save: Callable[[CashFlowRecord], bool],
+        initial_record: CashFlowRecord | None = None,
+    ) -> None:
+        super().__init__(owner)
+        self.withdraw()
+        _apply_window_icon(self)
+        self.configure(background=APP_BACKGROUND)
+        self.title("修改出入金" if initial_record is not None else "增加出入金")
+        self.resizable(False, False)
+        self.transient(owner)
+        self._on_save = on_save
+        self.date_var = tk.StringVar(value=(
+            initial_record.flow_date if initial_record else date.today().isoformat()
+        ))
+        self.type_var = tk.StringVar(value=(
+            initial_record.flow_type if initial_record else "入金"
+        ))
+        self.currency_var = tk.StringVar(value=(
+            next(name for name, code in CASH_FLOW_CURRENCIES.items()
+                 if code == initial_record.currency) if initial_record else "港币"
+        ))
+        self.rate_var = tk.StringVar(value=(
+            initial_record.exchange_rate if initial_record else ""
+        ))
+        self.amount_var = tk.StringVar(value=(
+            initial_record.cny_amount if initial_record else ""
+        ))
+        self.rate_hint_var = tk.StringVar()
+        self.foreign_var = tk.StringVar(value="--")
+
+        content = ttk.Frame(self, padding=(22, 18))
+        content.pack(fill=tk.BOTH, expand=True)
+        content.columnconfigure(1, weight=1)
+        for row, label in enumerate(("日期", "类型", "货币", "汇率", "人民币金额")):
+            ttk.Label(content, text=label).grid(
+                row=row, column=0, sticky=tk.W, padx=(0, 18), pady=(0, 12)
+            )
+        self.date_entry = ttk.Entry(
+            content, textvariable=self.date_var, state="readonly", cursor="hand2"
+        )
+        self.date_entry.grid(row=0, column=1, sticky=tk.EW, pady=(0, 12))
+        self.date_entry.bind("<Button-1>", self._open_calendar)
+        type_controls = ttk.Frame(content)
+        type_controls.grid(row=1, column=1, sticky=tk.W, pady=(0, 12))
+        for name in ("入金", "出金"):
+            ttk.Radiobutton(
+                type_controls, text=name, value=name, variable=self.type_var
+            ).pack(side=tk.LEFT, padx=(0, 18))
+        ttk.Combobox(
+            content, textvariable=self.currency_var,
+            values=tuple(CASH_FLOW_CURRENCIES), state="readonly", width=28,
+        ).grid(row=2, column=1, sticky=tk.EW, pady=(0, 12))
+        rate_controls = ttk.Frame(content)
+        rate_controls.grid(row=3, column=1, sticky=tk.EW, pady=(0, 12))
+        self.rate_entry = ttk.Entry(rate_controls, textvariable=self.rate_var)
+        self.rate_entry.pack(fill=tk.X)
+        ttk.Label(rate_controls, textvariable=self.rate_hint_var).pack(anchor=tk.W)
+        ttk.Entry(content, textvariable=self.amount_var).grid(
+            row=4, column=1, sticky=tk.EW, pady=(0, 12)
+        )
+        ttk.Label(content, text="折合外币金额").grid(
+            row=5, column=0, sticky=tk.W, padx=(0, 18), pady=(0, 16)
+        )
+        ttk.Label(content, textvariable=self.foreign_var).grid(
+            row=5, column=1, sticky=tk.W, pady=(0, 16)
+        )
+        buttons = ttk.Frame(content)
+        buttons.grid(row=6, column=0, columnspan=2, sticky=tk.E)
+        ttk.Button(buttons, text="取消", command=self.destroy).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+        ttk.Button(
+            buttons, text="保存", command=self._submit, style="Primary.TButton"
+        ).pack(side=tk.LEFT)
+        for variable in (self.currency_var, self.rate_var, self.amount_var):
+            variable.trace_add("write", self._refresh_preview)
+        self._refresh_preview()
+        self.bind("<Return>", lambda _event: self._submit())
+        self.bind("<Escape>", lambda _event: self.destroy())
+        _center_and_show(self, owner)
+        self.grab_set()
+        self.rate_entry.focus_set()
+
+    def _open_calendar(self, _event: tk.Event | None = None) -> str:
+        popup = CalendarPopup(self, self.date_var.get(), self.date_var.set)
+        popup.title("选择出入金日期")
+        return "break"
+
+    def _record(self) -> CashFlowRecord:
+        return CashFlowRecord.from_values(
+            self.date_var.get(), self.type_var.get(),
+            CASH_FLOW_CURRENCIES.get(self.currency_var.get(), ""),
+            self.rate_var.get(), self.amount_var.get(),
+        )
+
+    def _refresh_preview(self, *_args: str) -> None:
+        currency = CASH_FLOW_CURRENCIES.get(self.currency_var.get(), "--")
+        self.rate_hint_var.set(f"1 {currency} = 所填汇率 CNY")
+        try:
+            record = self._record()
+        except ValueError:
+            self.foreign_var.set("--")
+            return
+        self.foreign_var.set(f"{record.foreign_amount:,.2f} {record.currency}")
+
+    def _submit(self) -> None:
+        try:
+            record = self._record()
+        except ValueError as exc:
+            messagebox.showerror("出入金记录错误", str(exc), parent=self)
+            return
+        if self._on_save(record):
+            self.destroy()
+        else:
+            messagebox.showerror(
+                "保存失败", "出入金记录未保存，请检查数据文件和目录权限。", parent=self
+            )
+
+
+class CashFlowWindow(tk.Toplevel):
+    def __init__(self, owner: StockPriceApp) -> None:
+        super().__init__(owner)
+        self.withdraw()
+        _apply_window_icon(self)
+        self.configure(background=APP_BACKGROUND)
+        self.owner = owner
+        self.title("出入金记录")
+        self.geometry("880x430")
+        self.minsize(760, 340)
+        self.transient(owner)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        outer = ttk.Frame(self, padding=(20, 18, 20, 16))
+        outer.pack(fill=tk.BOTH, expand=True)
+        header = ttk.Frame(outer)
+        header.pack(fill=tk.X, pady=(0, 14))
+        self.summary_var = tk.StringVar()
+        ttk.Label(header, textvariable=self.summary_var).pack(side=tk.LEFT)
+        ttk.Button(
+            header, text="增加出入金", command=self._add, style="Primary.TButton"
+        ).pack(side=tk.RIGHT)
+        table = ttk.Frame(outer)
+        table.pack(fill=tk.BOTH, expand=True)
+        columns = ("date", "type", "currency", "rate", "cny", "foreign")
+        self.tree = ttk.Treeview(
+            table, columns=columns, show="headings", selectmode="browse"
+        )
+        for column, title, width in zip(columns, (
+            "日期", "类型", "货币", "汇率（CNY/外币）", "人民币金额", "外币金额"
+        ), (110, 70, 85, 160, 160, 160)):
+            self.tree.heading(column, text=title, anchor=tk.CENTER)
+            self.tree.column(column, width=width, minwidth=60, anchor=tk.CENTER)
+        scrollbar = ttk.Scrollbar(table, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        table.rowconfigure(0, weight=1)
+        table.columnconfigure(0, weight=1)
+        self.menu = tk.Menu(self, tearoff=False)
+        self.menu.add_command(label="修改", command=self._edit)
+        self.menu.add_command(label="删除", command=self._delete)
+        self.tree.bind("<Button-3>", self._show_menu)
+        self.tree.bind("<Double-1>", self._edit)
+        ttk.Label(
+            outer,
+            text="净出金 = 累计出金 − 累计入金（人民币）；右键记录可修改或删除。",
+            style="Hint.TLabel",
+        ).pack(anchor=tk.W, pady=(10, 0))
+        self.reload()
+        _center_and_show(self, owner, fit_content=False)
+
+    def reload(self) -> None:
+        self.summary_var.set(f"净出金：{self.owner._net_cash_outflow():,.2f} CNY")
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for index, record in enumerate(self.owner.cash_flows):
+            self.tree.insert("", tk.END, iid=str(index), values=(
+                record.flow_date, record.flow_type,
+                "港币" if record.currency == "HKD" else "美元",
+                record.exchange_rate, f"{Decimal(record.cny_amount):,.2f}",
+                f"{record.foreign_amount:,.2f} {record.currency}",
+            ))
+
+    def _selected_index(self) -> int | None:
+        selected = self.tree.selection()
+        return int(selected[0]) if selected else None
+
+    def _show_menu(self, event: tk.Event) -> None:
+        item = self.tree.identify_row(event.y)
+        if item:
+            self.tree.selection_set(item)
+            try:
+                self.menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                self.menu.grab_release()
+
+    def _add(self) -> None:
+        CashFlowEntryDialog(self, self.owner._add_cash_flow)
+
+    def _edit(self, event: tk.Event | None = None) -> None:
+        if event is not None:
+            item = self.tree.identify_row(event.y)
+            if not item:
+                return
+            self.tree.selection_set(item)
+        index = self._selected_index()
+        if index is not None:
+            CashFlowEntryDialog(
+                self, lambda record: self.owner._update_cash_flow(index, record),
+                self.owner.cash_flows[index],
+            )
+
+    def _delete(self) -> None:
+        index = self._selected_index()
+        if index is not None and messagebox.askyesno(
+            "删除出入金", "确定删除选中的出入金记录？", parent=self
+        ):
+            if not self.owner._delete_cash_flow(index):
+                messagebox.showerror("删除失败", "记录未删除，请检查数据目录权限。", parent=self)
+
+    def _close(self) -> None:
+        self.owner._cash_flow_window = None
+        self.destroy()
+
+
 class StockPriceApp(tk.Tk):
     def __init__(self, state_path: Path | None = None) -> None:
         super().__init__()
@@ -1649,6 +1938,10 @@ class StockPriceApp(tk.Tk):
         self.display_names: dict[str, str] = {}
         self.trades: dict[str, list[TradeRecord]] = {}
         self.t_trade_groups: dict[str, list[TTradeGroup]] = {}
+        self.cash_flows: list[CashFlowRecord] = []
+        self._cash_flow_window: CashFlowWindow | None = None
+        self._cash_flow_load_error = ""
+        self._cash_flow_unparsed: object = None
         self.trade_window_size = TRADE_WINDOW_DEFAULT_SIZE
         self.trade_column_widths = DEFAULT_TRADE_COLUMN_WIDTHS.copy()
         self.show_closed_positions = {market: True for market in MARKET_ORDER}
@@ -1687,6 +1980,7 @@ class StockPriceApp(tk.Tk):
         self._build_ui()
         self._restore_state()
         self._refresh_statistics_dashboard()
+        self._refresh_cash_flow_summary()
         self._schedule_market_cell_labels()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         _lock_main_window_controls(self)
@@ -2159,7 +2453,7 @@ class StockPriceApp(tk.Tk):
         content.pack(fill=tk.BOTH, expand=True, padx=18, pady=14)
         content.columnconfigure(0, weight=1, uniform="statistics")
         content.columnconfigure(1, weight=1, uniform="statistics")
-        content.rowconfigure(3, weight=1)
+        content.rowconfigure(4, weight=1)
 
         header = tk.Frame(content, background=STATISTICS_BACKGROUND)
         header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
@@ -2216,6 +2510,32 @@ class StockPriceApp(tk.Tk):
             font=("Microsoft YaHei UI", 22, "bold"),
         ).grid(row=1, column=0, sticky="w", padx=18, pady=(0, 12))
 
+        cash_border, cash_card = self._create_statistics_card(content, STATISTICS_CARD)
+        cash_border.grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(0, 10)
+        )
+        cash_card.columnconfigure(0, weight=1)
+        cash_title = tk.Label(
+            cash_card, text="净出金", background=STATISTICS_CARD,
+            foreground=STATISTICS_TEXT, font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        cash_title.grid(row=0, column=0, sticky="w", padx=18, pady=(9, 0))
+        self.net_cash_outflow_var = tk.StringVar(value="0.00 CNY")
+        cash_value = tk.Label(
+            cash_card, textvariable=self.net_cash_outflow_var,
+            background=STATISTICS_CARD, foreground=STATISTICS_TEXT,
+            font=("Microsoft YaHei UI", 18, "bold"),
+        )
+        cash_value.grid(row=1, column=0, sticky="w", padx=18, pady=(0, 9))
+        cash_hint = tk.Label(
+            cash_card, text="双击管理出入金记录", background=STATISTICS_CARD,
+            foreground=STATISTICS_TEXT, font=("Microsoft YaHei UI", 9),
+        )
+        cash_hint.grid(row=0, column=1, rowspan=2, sticky="e", padx=18)
+        for widget in (cash_border, cash_card, cash_title, cash_value, cash_hint):
+            widget.configure(cursor="hand2")
+            widget.bind("<Double-1>", self._open_cash_flow_window)
+
         self.statistics_usd_rate_var = tk.StringVar(value="1 USD = -- CNY")
         self.statistics_hkd_rate_var = tk.StringVar(value="1 HKD = -- CNY")
         self.statistics_rate_date_var = tk.StringVar(value="ECB 参考日期  --")
@@ -2226,7 +2546,7 @@ class StockPriceApp(tk.Tk):
         for column, title, value_var in rate_specs:
             border, card = self._create_statistics_card(content, STATISTICS_CARD)
             border.grid(
-                row=2,
+                row=3,
                 column=column,
                 sticky="nsew",
                 padx=(0, 5) if column == 0 else (5, 0),
@@ -2264,7 +2584,7 @@ class StockPriceApp(tk.Tk):
         for column, market in enumerate(MARKET_ORDER):
             border, card = self._create_statistics_card(content, STATISTICS_CARD)
             border.grid(
-                row=3,
+                row=4,
                 column=column,
                 sticky="nsew",
                 padx=(0, 5) if column == 0 else (5, 0),
@@ -2340,6 +2660,78 @@ class StockPriceApp(tk.Tk):
                 padx=16,
                 pady=13,
             )
+
+    def _net_cash_outflow(self) -> Decimal:
+        return sum((
+            Decimal(record.cny_amount) * (1 if record.flow_type == "出金" else -1)
+            for record in self.cash_flows
+        ), Decimal("0"))
+
+    def _refresh_cash_flow_summary(self) -> None:
+        self.net_cash_outflow_var.set(
+            "--" if self._cash_flow_load_error
+            else f"{self._net_cash_outflow():,.2f} CNY"
+        )
+        if self._cash_flow_window is not None and self._cash_flow_window.winfo_exists():
+            self._cash_flow_window.reload()
+
+    def _open_cash_flow_window(self, _event: tk.Event | None = None) -> None:
+        if self._cash_flow_load_error:
+            messagebox.showerror("出入金数据错误", self._cash_flow_load_error, parent=self)
+            return
+        if self._cash_flow_window is not None and self._cash_flow_window.winfo_exists():
+            self._cash_flow_window.deiconify()
+            self._cash_flow_window.lift()
+            self._cash_flow_window.focus_force()
+            return
+        self._cash_flow_window = CashFlowWindow(self)
+
+    def _replace_cash_flows(self, records: list[CashFlowRecord]) -> bool:
+        if self._cash_flow_load_error:
+            return False
+        try:
+            validated = [CashFlowRecord.from_values(**record.to_payload()) for record in records]
+        except ValueError:
+            return False
+        previous = self.cash_flows
+        self.cash_flows = validated
+        if not self._save_state():
+            self.cash_flows = previous
+            return False
+        self._refresh_cash_flow_summary()
+        return True
+
+    def _add_cash_flow(self, record: CashFlowRecord) -> bool:
+        return self._replace_cash_flows([*self.cash_flows, record])
+
+    def _update_cash_flow(self, index: int, record: CashFlowRecord) -> bool:
+        if not 0 <= index < len(self.cash_flows):
+            return False
+        records = self.cash_flows.copy()
+        records[index] = record
+        return self._replace_cash_flows(records)
+
+    def _delete_cash_flow(self, index: int) -> bool:
+        if not 0 <= index < len(self.cash_flows):
+            return False
+        return self._replace_cash_flows(self.cash_flows[:index] + self.cash_flows[index + 1:])
+
+    def _restore_cash_flows(self, raw: object) -> None:
+        try:
+            if not isinstance(raw, list):
+                raise ValueError("记录列表格式无效")
+            records = []
+            for item in raw:
+                if not isinstance(item, dict):
+                    raise ValueError("记录格式无效")
+                records.append(CashFlowRecord.from_values(
+                    item.get("flow_date"), item.get("flow_type"), item.get("currency"),
+                    item.get("exchange_rate"), item.get("cny_amount"),
+                ))
+            self.cash_flows = records
+        except ValueError:
+            self._cash_flow_load_error = "出入金数据格式异常，原始记录已保留，暂不允许修改。"
+            self._cash_flow_unparsed = raw
 
     def _restore_geometry(self, _geometry: object) -> bool:
         self.geometry(f"{MAIN_WINDOW_SIZE[0]}x{MAIN_WINDOW_SIZE[1]}")
@@ -2638,6 +3030,7 @@ class StockPriceApp(tk.Tk):
             }:
                 raise ValueError("保存文件版本不受支持")
 
+            self._restore_cash_flows(payload.get("cash_flows", []))
             layout_restored = self._restore_geometry(payload.get("window_geometry"))
             saved_closed_visibility = payload.get("show_closed_positions")
             if isinstance(saved_closed_visibility, dict):
@@ -2930,6 +3323,10 @@ class StockPriceApp(tk.Tk):
             "active_page": active_page,
             "show_closed_positions": self.show_closed_positions.copy(),
             "stocks": [],
+            "cash_flows": (
+                self._cash_flow_unparsed if self._cash_flow_load_error
+                else [record.to_payload() for record in self.cash_flows]
+            ),
             "trades": {
                 symbol: [
                     {
