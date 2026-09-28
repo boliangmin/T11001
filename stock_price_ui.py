@@ -2465,14 +2465,6 @@ class StockPriceApp(tk.Tk):
             foreground=STATISTICS_TEXT,
             font=("Microsoft YaHei UI", 17, "bold"),
         ).grid(row=0, column=0, rowspan=2, sticky="w")
-        self.statistics_refresh_time_var = tk.StringVar(value="统一刷新时间  --")
-        tk.Label(
-            header,
-            textvariable=self.statistics_refresh_time_var,
-            background=STATISTICS_BACKGROUND,
-            foreground=STATISTICS_TEXT,
-            font=("Microsoft YaHei UI", 9),
-        ).grid(row=0, column=1, sticky="e")
         self.statistics_warning_var = tk.StringVar(value="")
         tk.Label(
             header,
@@ -2527,12 +2519,7 @@ class StockPriceApp(tk.Tk):
             font=("Microsoft YaHei UI", 18, "bold"),
         )
         cash_value.grid(row=1, column=0, sticky="w", padx=18, pady=(0, 9))
-        cash_hint = tk.Label(
-            cash_card, text="双击管理出入金记录", background=STATISTICS_CARD,
-            foreground=STATISTICS_TEXT, font=("Microsoft YaHei UI", 9),
-        )
-        cash_hint.grid(row=0, column=1, rowspan=2, sticky="e", padx=18)
-        for widget in (cash_border, cash_card, cash_title, cash_value, cash_hint):
+        for widget in (cash_border, cash_card, cash_title, cash_value):
             widget.configure(cursor="hand2")
             widget.bind("<Double-1>", self._open_cash_flow_window)
 
@@ -2940,12 +2927,6 @@ class StockPriceApp(tk.Tk):
             "--" if cny_total is None else f"{cny_total:,.2f} CNY"
         )
         self.statistics_warning_var.set(self.exchange_rate_warning)
-        self.statistics_refresh_time_var.set(
-            "统一刷新时间  --"
-            if self.last_refresh_time is None
-            else "统一刷新时间  "
-            f"{self.last_refresh_time.strftime('%Y-%m-%d %H:%M:%S')}"
-        )
         self._refresh_market_summary(metrics_by_market)
 
     def _tree_for_symbol(self, symbol: StockSymbol) -> ttk.Treeview:
