@@ -11,6 +11,7 @@ import msvcrt
 import os
 import queue
 import re
+import shutil
 import sys
 import threading
 import tkinter as tk
@@ -24,6 +25,7 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 from tkinter import font as tkfont
 
+from google_drive_sync import CloudSnapshotInfo, GoogleDriveSyncClient
 from stock_price import (
     ExchangeRates,
     PriceQuote,
@@ -1933,6 +1935,8 @@ class StockPriceApp(tk.Tk):
 
         self._state_path = state_path or _default_state_path()
         self._state_lock_handle = None
+        self._skip_state_save_on_close = False
+        self._window_geometry_restored = False
         if not self._acquire_state_lock():
             messagebox.showwarning(
                 "程序已在运行",
@@ -1977,6 +1981,7 @@ class StockPriceApp(tk.Tk):
         ) = None
         self._result_queue: queue.Queue[tuple] = queue.Queue()
         self._refreshing = False
+        self._cloud_syncing = False
         self._queue_after_id: str | None = None
         self._auto_refresh_after_id: str | None = None
         self._layout_after_id: str | None = None
@@ -1995,7 +2000,10 @@ class StockPriceApp(tk.Tk):
         self._schedule_market_cell_labels()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         _lock_main_window_controls(self)
-        _center_and_show(self, fit_content=False)
+        if self._window_geometry_restored:
+            self.deiconify()
+        else:
+            _center_and_show(self, fit_content=False)
         self.update_idletasks()
         self._fit_market_columns_to_viewport()
         self._queue_after_id = self.after(100, self._process_result_queue)
@@ -2275,6 +2283,50 @@ class StockPriceApp(tk.Tk):
         self.code_entry.bind("<Down>", self._focus_suggestions)
         self.code_var.trace_add("write", self._on_query_changed)
 
+        def create_cloud_control(
+            text: str,
+            callback: Callable[[tk.Event], None],
+        ) -> tk.Label:
+            control = tk.Label(
+                input_frame,
+                text=text,
+                background=SURFACE,
+                foreground=TEXT_PRIMARY,
+                font=("Microsoft YaHei UI", 9),
+                padx=12,
+                pady=7,
+                borderwidth=1,
+                relief=tk.SOLID,
+                highlightthickness=0,
+                takefocus=False,
+                cursor="hand2",
+            )
+            control.bind("<Button-1>", callback)
+            control.bind(
+                "<Enter>",
+                lambda _event, widget=control: self._set_cloud_control_hover(
+                    widget, True
+                ),
+            )
+            control.bind(
+                "<Leave>",
+                lambda _event, widget=control: self._set_cloud_control_hover(
+                    widget, False
+                ),
+            )
+            return control
+
+        self.cloud_upload_control = create_cloud_control(
+            "上传云端",
+            self._upload_cloud_state,
+        )
+        self.cloud_upload_control.pack(side=tk.LEFT, padx=(12, 0))
+        self.cloud_download_control = create_cloud_control(
+            "同步云端",
+            self._download_cloud_state,
+        )
+        self.cloud_download_control.pack(side=tk.LEFT, padx=(8, 0))
+
         self.refresh_button = ttk.Button(
             input_frame,
             text="刷新全部",
@@ -2283,7 +2335,7 @@ class StockPriceApp(tk.Tk):
         )
         self.refresh_button.pack(side=tk.LEFT, padx=(14, 0))
 
-        self.suggestion_frame = ttk.Frame(outer, padding=(84, 0, 136, 8))
+        self.suggestion_frame = ttk.Frame(outer, padding=(84, 0, 340, 8))
         suggestion_border = tk.Frame(
             self.suggestion_frame,
             background=DIVIDER,
@@ -2765,8 +2817,19 @@ class StockPriceApp(tk.Tk):
             self._cash_flow_load_error = "出入金数据格式异常，原始记录已保留，暂不允许修改。"
             self._cash_flow_unparsed = raw
 
-    def _restore_geometry(self, _geometry: object) -> bool:
-        self.geometry(f"{MAIN_WINDOW_SIZE[0]}x{MAIN_WINDOW_SIZE[1]}")
+    def _restore_geometry(self, geometry: object) -> bool:
+        value = str(geometry or "").strip()
+        match = re.fullmatch(r"\d+x\d+([+-]\d+)([+-]\d+)", value)
+        if match is None:
+            self.geometry(f"{MAIN_WINDOW_SIZE[0]}x{MAIN_WINDOW_SIZE[1]}")
+            return False
+        x_position = int(match.group(1))
+        y_position = int(match.group(2))
+        self.geometry(
+            f"{MAIN_WINDOW_SIZE[0]}x{MAIN_WINDOW_SIZE[1]}"
+            f"{x_position:+d}{y_position:+d}"
+        )
+        self._window_geometry_restored = True
         return True
 
     def _acquire_state_lock(self) -> bool:
@@ -3336,7 +3399,8 @@ class StockPriceApp(tk.Tk):
             "version": STATE_VERSION,
             "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "window_geometry": (
-                f"{MAIN_WINDOW_SIZE[0]}x{MAIN_WINDOW_SIZE[1]}+0+0"
+                f"{MAIN_WINDOW_SIZE[0]}x{MAIN_WINDOW_SIZE[1]}"
+                f"{self.winfo_x():+d}{self.winfo_y():+d}"
             ),
             "column_widths": {
                 column: int(layout_tree.column(column, "width"))
@@ -3435,11 +3499,175 @@ class StockPriceApp(tk.Tk):
         if self._market_overlay_after_id is not None:
             self.after_cancel(self._market_overlay_after_id)
             self._market_overlay_after_id = None
-        for trade_window in list(self._trade_windows.values()):
-            self._capture_trade_window_layout(trade_window)
-        self._save_state()
+        if not self._skip_state_save_on_close:
+            for trade_window in list(self._trade_windows.values()):
+                self._capture_trade_window_layout(trade_window)
+            self._save_state()
         self._release_state_lock()
         self.destroy()
+
+    def _set_cloud_control_hover(
+        self,
+        control: tk.Label,
+        hovered: bool,
+    ) -> None:
+        if self._cloud_syncing:
+            return
+        control.configure(background=ACCENT_SOFT if hovered else SURFACE)
+
+    def _set_cloud_sync_busy(self, busy: bool) -> None:
+        self._cloud_syncing = busy
+        foreground = TEXT_SECONDARY if busy else TEXT_PRIMARY
+        cursor = "arrow" if busy else "hand2"
+        for control in (
+            self.cloud_upload_control,
+            self.cloud_download_control,
+        ):
+            control.configure(
+                background=SURFACE,
+                foreground=foreground,
+                cursor=cursor,
+            )
+
+    def _cloud_status_from_worker(self, status: str) -> None:
+        self._result_queue.put(("cloud_status", status))
+
+    @staticmethod
+    def _format_cloud_time(value: str) -> str:
+        try:
+            return datetime.fromisoformat(value).astimezone().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+        except ValueError:
+            return value
+
+    def _upload_cloud_state(self, _event: tk.Event | None = None) -> None:
+        if self._cloud_syncing:
+            self.status_var.set("云端同步正在进行，请稍候。")
+            return
+        if not messagebox.askyesno(
+            "上传云端",
+            "将把本机的完整状态上传到 Google Drive，并覆盖当前云端快照。\n\n"
+            "上传内容包括股票、交易记录、T 交易、出入金、窗口位置、"
+            "列宽和当前页面。是否继续？",
+            parent=self,
+        ):
+            return
+        if not self._save_state():
+            messagebox.showerror(
+                "上传失败",
+                "本地状态保存失败，未开始上传。",
+                parent=self,
+            )
+            return
+        try:
+            state_bytes = self._state_path.read_bytes()
+        except OSError as exc:
+            messagebox.showerror(
+                "上传失败",
+                f"无法读取本地状态：{exc}",
+                parent=self,
+            )
+            return
+        self._set_cloud_sync_busy(True)
+        self.status_var.set("正在准备 Google Drive 云端上传……")
+        threading.Thread(
+            target=self._cloud_upload_worker,
+            args=(state_bytes,),
+            daemon=True,
+        ).start()
+
+    def _cloud_upload_worker(self, state_bytes: bytes) -> None:
+        try:
+            client = GoogleDriveSyncClient(self._cloud_status_from_worker)
+            info = client.upload_state(state_bytes)
+            self._result_queue.put(("cloud_upload_done", info))
+        except Exception as exc:
+            self._result_queue.put(("cloud_error", "上传云端", str(exc)))
+
+    def _download_cloud_state(self, _event: tk.Event | None = None) -> None:
+        if self._cloud_syncing:
+            self.status_var.set("云端同步正在进行，请稍候。")
+            return
+        if self._refreshing:
+            self.status_var.set("请等待行情刷新完成后再同步云端。")
+            return
+        if not messagebox.askyesno(
+            "同步云端",
+            "将下载 Google Drive 中的完整状态，备份本地状态后用云端内容"
+            "全部替换。\n\n同步成功后程序会自动关闭，请重新打开以载入云端信息。"
+            "是否继续？",
+            parent=self,
+        ):
+            return
+        if not self._save_state():
+            messagebox.showerror(
+                "同步失败",
+                "本地状态保存失败，未开始下载。",
+                parent=self,
+            )
+            return
+        self._set_cloud_sync_busy(True)
+        self.status_var.set("正在准备 Google Drive 云端同步……")
+        threading.Thread(
+            target=self._cloud_download_worker,
+            daemon=True,
+        ).start()
+
+    def _cloud_download_worker(self) -> None:
+        try:
+            client = GoogleDriveSyncClient(self._cloud_status_from_worker)
+            state_bytes, info = client.download_state()
+            self._result_queue.put(("cloud_download_ready", state_bytes, info))
+        except Exception as exc:
+            self._result_queue.put(("cloud_error", "同步云端", str(exc)))
+
+    def _apply_downloaded_cloud_state(
+        self,
+        state_bytes: bytes,
+        info: CloudSnapshotInfo,
+    ) -> None:
+        temporary_path = self._state_path.with_name(
+            f"{self._state_path.name}.{os.getpid()}.cloud.tmp"
+        )
+        backup_path: Path | None = None
+        try:
+            json.loads(state_bytes.decode("utf-8"))
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            if self._state_path.is_file():
+                timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+                backup_path = self._state_path.with_name(
+                    f"{self._state_path.name}.bak.{timestamp}"
+                )
+                shutil.copy2(self._state_path, backup_path)
+            temporary_path.write_bytes(state_bytes)
+            temporary_path.replace(self._state_path)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            self._set_cloud_sync_busy(False)
+            self.status_var.set(f"同步云端失败：{exc}")
+            messagebox.showerror(
+                "同步失败",
+                f"无法替换本地状态：{exc}",
+                parent=self,
+            )
+            return
+        finally:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        self._skip_state_save_on_close = True
+        uploaded_time = self._format_cloud_time(info.uploaded_at)
+        backup_text = str(backup_path) if backup_path is not None else "无"
+        self.status_var.set("云端状态已写入，程序即将关闭。")
+        messagebox.showinfo(
+            "同步完成",
+            f"已同步云端版本 {info.revision}（{uploaded_time}）。\n"
+            f"本地备份：{backup_text}\n\n程序将关闭，请重新打开。",
+            parent=self,
+        )
+        self.after_idle(self._on_close)
 
     def _on_query_changed(self, *_args: object) -> None:
         if self._setting_selection:
@@ -4736,6 +4964,35 @@ class StockPriceApp(tk.Tk):
                         self._suggestions = []
                         self._hide_suggestions()
                         self.status_var.set(f"搜索失败：{error}")
+                elif kind == "cloud_status":
+                    if self._cloud_syncing:
+                        self.status_var.set(message[1])
+                elif kind == "cloud_upload_done":
+                    _, info = message
+                    self._set_cloud_sync_busy(False)
+                    uploaded_time = self._format_cloud_time(info.uploaded_at)
+                    self.status_var.set(
+                        f"完整状态已上传到 Google Drive · 版本 {info.revision}"
+                    )
+                    messagebox.showinfo(
+                        "上传完成",
+                        f"完整状态已上传到 Google Drive。\n"
+                        f"云端版本：{info.revision}\n上传时间：{uploaded_time}",
+                        parent=self,
+                    )
+                elif kind == "cloud_download_ready":
+                    _, state_bytes, info = message
+                    self._set_cloud_sync_busy(False)
+                    self._apply_downloaded_cloud_state(state_bytes, info)
+                elif kind == "cloud_error":
+                    _, action, error = message
+                    self._set_cloud_sync_busy(False)
+                    self.status_var.set(f"{action}失败：{error}")
+                    messagebox.showerror(
+                        f"{action}失败",
+                        error,
+                        parent=self,
+                    )
                 elif kind == "done":
                     _, count, finished_at = message
                     self._finish_refresh(count, finished_at)
