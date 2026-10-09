@@ -2476,22 +2476,24 @@ class StockPriceApp(tk.Tk):
             foreground=STATISTICS_TEXT,
             font=("Microsoft YaHei UI", 17, "bold"),
         ).grid(row=0, column=0, rowspan=2, sticky="w")
-        self.statistics_privacy_button = tk.Button(
+        self.statistics_privacy_control = tk.Label(
             header,
             text="👁",
-            command=self._toggle_statistics_amounts,
             background=STATISTICS_BACKGROUND,
             foreground=STATISTICS_TEXT,
-            activebackground=STATISTICS_BACKGROUND,
-            activeforeground=STATISTICS_TEXT,
             font=("Segoe UI Emoji", 13),
             width=2,
             borderwidth=0,
             relief=tk.FLAT,
+            highlightthickness=0,
             cursor="hand2",
-            takefocus=True,
+            takefocus=False,
         )
-        self.statistics_privacy_button.grid(row=0, column=1, sticky="e")
+        self.statistics_privacy_control.grid(row=0, column=1, sticky="e")
+        self.statistics_privacy_control.bind(
+            "<Button-1>",
+            self._toggle_statistics_amounts,
+        )
         self.statistics_warning_var = tk.StringVar(value="")
         tk.Label(
             header,
@@ -2688,11 +2690,11 @@ class StockPriceApp(tk.Tk):
         else:
             self.statistics_cny_total_var.set("****** CNY")
             self.net_cash_outflow_var.set("****** CNY")
-        self.statistics_privacy_button.configure(
-            relief=(tk.SUNKEN if self._statistics_amounts_visible else tk.FLAT)
-        )
 
-    def _toggle_statistics_amounts(self) -> None:
+    def _toggle_statistics_amounts(
+        self,
+        _event: tk.Event | None = None,
+    ) -> None:
         self._statistics_amounts_visible = not self._statistics_amounts_visible
         self._refresh_statistics_amount_visibility()
 
