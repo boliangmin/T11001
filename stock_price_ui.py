@@ -1957,6 +1957,9 @@ class StockPriceApp(tk.Tk):
         self.exchange_rates: ExchangeRates | None = None
         self.exchange_rate_warning = ""
         self.last_refresh_time: datetime | None = None
+        self._statistics_amounts_visible = False
+        self._statistics_cny_total_text = "--"
+        self._net_cash_outflow_text = "0.00 CNY"
         self._trade_windows: dict[str, StockTradeWindow] = {}
         self.trees: dict[str, ttk.Treeview] = {}
         self.market_pages: dict[str, ttk.Frame] = {}
@@ -2473,6 +2476,22 @@ class StockPriceApp(tk.Tk):
             foreground=STATISTICS_TEXT,
             font=("Microsoft YaHei UI", 17, "bold"),
         ).grid(row=0, column=0, rowspan=2, sticky="w")
+        self.statistics_privacy_button = tk.Button(
+            header,
+            text="👁",
+            command=self._toggle_statistics_amounts,
+            background=STATISTICS_BACKGROUND,
+            foreground=STATISTICS_TEXT,
+            activebackground=STATISTICS_BACKGROUND,
+            activeforeground=STATISTICS_TEXT,
+            font=("Segoe UI Emoji", 13),
+            width=2,
+            borderwidth=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            takefocus=True,
+        )
+        self.statistics_privacy_button.grid(row=0, column=1, sticky="e")
         self.statistics_warning_var = tk.StringVar(value="")
         tk.Label(
             header,
@@ -2501,7 +2520,7 @@ class StockPriceApp(tk.Tk):
             foreground=STATISTICS_TEXT,
             font=("Microsoft YaHei UI", 10, "bold"),
         ).grid(row=0, column=0, sticky="w", padx=18, pady=(12, 0))
-        self.statistics_cny_total_var = tk.StringVar(value="--")
+        self.statistics_cny_total_var = tk.StringVar(value="****** CNY")
         tk.Label(
             cny_card,
             textvariable=self.statistics_cny_total_var,
@@ -2520,7 +2539,7 @@ class StockPriceApp(tk.Tk):
             foreground=STATISTICS_TEXT, font=("Microsoft YaHei UI", 10, "bold"),
         )
         cash_title.grid(row=0, column=0, sticky="w", padx=18, pady=(9, 0))
-        self.net_cash_outflow_var = tk.StringVar(value="0.00 CNY")
+        self.net_cash_outflow_var = tk.StringVar(value="****** CNY")
         cash_value = tk.Label(
             cash_card, textvariable=self.net_cash_outflow_var,
             background=STATISTICS_CARD, foreground=STATISTICS_TEXT,
@@ -2662,11 +2681,27 @@ class StockPriceApp(tk.Tk):
             for record in self.cash_flows
         ), Decimal("0"))
 
+    def _refresh_statistics_amount_visibility(self) -> None:
+        if self._statistics_amounts_visible:
+            self.statistics_cny_total_var.set(self._statistics_cny_total_text)
+            self.net_cash_outflow_var.set(self._net_cash_outflow_text)
+        else:
+            self.statistics_cny_total_var.set("****** CNY")
+            self.net_cash_outflow_var.set("****** CNY")
+        self.statistics_privacy_button.configure(
+            relief=(tk.SUNKEN if self._statistics_amounts_visible else tk.FLAT)
+        )
+
+    def _toggle_statistics_amounts(self) -> None:
+        self._statistics_amounts_visible = not self._statistics_amounts_visible
+        self._refresh_statistics_amount_visibility()
+
     def _refresh_cash_flow_summary(self) -> None:
-        self.net_cash_outflow_var.set(
+        self._net_cash_outflow_text = (
             "--" if self._cash_flow_load_error
             else f"{self._net_cash_outflow():,.2f} CNY"
         )
+        self._refresh_statistics_amount_visibility()
         if self._cash_flow_window is not None and self._cash_flow_window.winfo_exists():
             self._cash_flow_window.reload()
 
@@ -2931,9 +2966,10 @@ class StockPriceApp(tk.Tk):
             metrics_by_market["HK"],
             rates,
         )
-        self.statistics_cny_total_var.set(
+        self._statistics_cny_total_text = (
             "--" if cny_total is None else f"{cny_total:,.2f} CNY"
         )
+        self._refresh_statistics_amount_visibility()
         self.statistics_warning_var.set(self.exchange_rate_warning)
         self._refresh_market_summary(metrics_by_market)
 
