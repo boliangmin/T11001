@@ -326,7 +326,7 @@ def _authorize_interactively(
     state = secrets.token_urlsafe(32)
     server = _OAuthCallbackServer(("127.0.0.1", 0), _OAuthCallbackHandler)
     redirect_uri = f"http://127.0.0.1:{server.server_port}"
-    authorization_url = f"{config.auth_uri}?{urlencode({
+    authorization_params = {
         'client_id': config.client_id,
         'redirect_uri': redirect_uri,
         'response_type': 'code',
@@ -337,7 +337,8 @@ def _authorize_interactively(
         'state': state,
         'code_challenge': challenge,
         'code_challenge_method': 'S256',
-    })}"
+    }
+    authorization_url = f"{config.auth_uri}?{urlencode(authorization_params)}"
     if status_callback is not None:
         status_callback("请在 Google Chrome 中选择账户并完成授权……")
     _open_authorization_in_chrome(authorization_url)
