@@ -2316,11 +2316,16 @@ class StockPriceApp(tk.Tk):
             )
             return control
 
+        self.google_login_control = create_cloud_control(
+            "登录谷歌",
+            self._login_google_account,
+        )
+        self.google_login_control.pack(side=tk.LEFT, padx=(12, 0))
         self.cloud_upload_control = create_cloud_control(
             "上传云端",
             self._upload_cloud_state,
         )
-        self.cloud_upload_control.pack(side=tk.LEFT, padx=(12, 0))
+        self.cloud_upload_control.pack(side=tk.LEFT, padx=(8, 0))
         self.cloud_download_control = create_cloud_control(
             "同步云端",
             self._download_cloud_state,
@@ -2335,7 +2340,7 @@ class StockPriceApp(tk.Tk):
         )
         self.refresh_button.pack(side=tk.LEFT, padx=(14, 0))
 
-        self.suggestion_frame = ttk.Frame(outer, padding=(84, 0, 340, 8))
+        self.suggestion_frame = ttk.Frame(outer, padding=(84, 0, 444, 8))
         suggestion_border = tk.Frame(
             self.suggestion_frame,
             background=DIVIDER,
@@ -3520,6 +3525,7 @@ class StockPriceApp(tk.Tk):
         foreground = TEXT_SECONDARY if busy else TEXT_PRIMARY
         cursor = "arrow" if busy else "hand2"
         for control in (
+            self.google_login_control,
             self.cloud_upload_control,
             self.cloud_download_control,
         ):
@@ -3531,6 +3537,28 @@ class StockPriceApp(tk.Tk):
 
     def _cloud_status_from_worker(self, status: str) -> None:
         self._result_queue.put(("cloud_status", status))
+
+    def _login_google_account(self, _event: tk.Event | None = None) -> None:
+        if self._cloud_syncing:
+            self.status_var.set("Google 授权或云端同步正在进行，请稍候。")
+            return
+        self._set_cloud_sync_busy(True)
+        self.status_var.set("正在启动 Google Chrome……")
+        threading.Thread(
+            target=self._google_login_worker,
+            daemon=True,
+        ).start()
+
+    def _google_login_worker(self) -> None:
+        try:
+            client = GoogleDriveSyncClient(
+                self._cloud_status_from_worker,
+                force_interactive_authorization=True,
+            )
+            client.verify_access()
+            self._result_queue.put(("cloud_login_done",))
+        except Exception as exc:
+            self._result_queue.put(("cloud_error", "登录谷歌", str(exc)))
 
     @staticmethod
     def _format_cloud_time(value: str) -> str:
@@ -4967,6 +4995,15 @@ class StockPriceApp(tk.Tk):
                 elif kind == "cloud_status":
                     if self._cloud_syncing:
                         self.status_var.set(message[1])
+                elif kind == "cloud_login_done":
+                    self._set_cloud_sync_busy(False)
+                    self.google_login_control.configure(text="谷歌已登录")
+                    self.status_var.set("Google 账户授权成功。")
+                    messagebox.showinfo(
+                        "登录成功",
+                        "Google 账户已完成授权，现在可以上传或同步云端。",
+                        parent=self,
+                    )
                 elif kind == "cloud_upload_done":
                     _, info = message
                     self._set_cloud_sync_busy(False)

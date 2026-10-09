@@ -9,9 +9,10 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
+import subprocess
 import sys
 import time
-import webbrowser
 from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -100,6 +101,41 @@ def oauth_config_candidates() -> list[Path]:
         if resolved not in unique:
             unique.append(resolved)
     return unique
+
+
+def _chrome_executable() -> Path:
+    candidates: list[Path] = []
+    discovered = shutil.which("chrome.exe") or shutil.which("chrome")
+    if discovered:
+        candidates.append(Path(discovered))
+    for environment_name in (
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "LOCALAPPDATA",
+    ):
+        root = os.environ.get(environment_name)
+        if root:
+            candidates.append(
+                Path(root) / "Google" / "Chrome" / "Application" / "chrome.exe"
+            )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    raise CloudSyncError(
+        "未找到 Google Chrome。请先安装 Chrome，再点击“登录谷歌”。"
+    )
+
+
+def _open_authorization_in_chrome(authorization_url: str) -> None:
+    chrome = _chrome_executable()
+    try:
+        subprocess.Popen(
+            [str(chrome), "--new-window", authorization_url],
+            close_fds=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError as exc:
+        raise CloudSyncError(f"无法启动 Google Chrome：{exc}") from exc
 
 
 def _load_oauth_config() -> OAuthClientConfig:
@@ -296,15 +332,15 @@ def _authorize_interactively(
         'response_type': 'code',
         'scope': DRIVE_SCOPE,
         'access_type': 'offline',
-        'prompt': 'consent',
+        'prompt': 'select_account consent',
         'include_granted_scopes': 'true',
         'state': state,
         'code_challenge': challenge,
         'code_challenge_method': 'S256',
     })}"
     if status_callback is not None:
-        status_callback("请在浏览器中选择 Google 账户并完成授权……")
-    webbrowser.open(authorization_url, new=1, autoraise=True)
+        status_callback("请在 Google Chrome 中选择账户并完成授权……")
+    _open_authorization_in_chrome(authorization_url)
     deadline = time.monotonic() + timeout
     try:
         while server.authorization_result is None and time.monotonic() < deadline:
@@ -470,12 +506,24 @@ class GoogleDriveSyncClient:
     def __init__(
         self,
         status_callback: Callable[[str], None] | None = None,
+        *,
+        force_interactive_authorization: bool = False,
     ) -> None:
         self._status_callback = status_callback
         self._config = _load_oauth_config()
-        self._access_token = self._get_access_token()
+        self._access_token = self._get_access_token(
+            force_interactive_authorization=force_interactive_authorization
+        )
 
-    def _get_access_token(self) -> str:
+    def _get_access_token(self, *, force_interactive_authorization: bool) -> str:
+        if force_interactive_authorization:
+            token = _authorize_interactively(
+                self._config,
+                timeout=300.0,
+                status_callback=self._status_callback,
+            )
+            return str(token["access_token"])
+
         token = _load_token()
         if token is not None and token.get("client_id") == self._config.client_id:
             access_token = str(token.get("access_token") or "")
@@ -488,12 +536,14 @@ class GoogleDriveSyncClient:
             except CloudSyncError as exc:
                 if "invalid_grant" not in str(exc) and "没有刷新令牌" not in str(exc):
                     raise
-        token = _authorize_interactively(
-            self._config,
-            timeout=300.0,
-            status_callback=self._status_callback,
+        raise CloudSyncError(
+            "尚未登录 Google。请先点击“登录谷歌”，在 Chrome 中完成授权。"
         )
-        return str(token["access_token"])
+
+    def verify_access(self) -> None:
+        if self._status_callback is not None:
+            self._status_callback("正在确认 Google Drive 授权……")
+        self._find_cloud_file()
 
     def _request(
         self,

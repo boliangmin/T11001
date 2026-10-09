@@ -20,10 +20,12 @@
 
 ## 首次使用
 
-1. 点击“上传云端”或“同步云端”。
-2. 系统浏览器会打开 Google 授权页面。
-3. 选择 Google 账户并允许应用访问自己的应用专用 Drive 数据。
-4. 授权结果通过本机 `127.0.0.1` 临时回调传回程序。
+1. 确认电脑已安装 Google Chrome。
+2. 点击“登录谷歌”。
+3. 程序会调用 Google Chrome，在新窗口中打开 Google 账户选择与授权页面。
+4. 选择 Google 账户并允许应用访问自己的应用专用 Drive 数据。
+5. 授权结果通过本机 `127.0.0.1` 临时回调传回程序。
+6. 登录成功后，再点击“上传云端”或“同步云端”。这两个操作不会自行打开浏览器。
 
 OAuth 访问令牌和刷新令牌使用 Windows DPAPI 加密，保存在当前 Windows 用户的 `%LOCALAPPDATA%\StockPriceViewer\google_oauth_token.bin`，不会写入 `state.json` 或 Git 仓库。
 
