@@ -85,6 +85,9 @@ DEFAULT_COLUMN_WIDTHS = {
 }
 MAIN_WINDOW_SIZE = (1256, 768)
 PASSWORD_WINDOW_SIZE = (380, 210)
+TITLE_ICON_MENU_LOGIN = 0x5101
+TITLE_ICON_MENU_UPLOAD = 0x5102
+TITLE_ICON_MENU_DOWNLOAD = 0x5103
 MIN_MARKET_COLUMN_WIDTH = 60
 MARKET_ROW_HEIGHT = 32
 MARKET_SPACER_PREFIX = "__market_spacer__"
@@ -1937,6 +1940,10 @@ class StockPriceApp(tk.Tk):
         self._state_lock_handle = None
         self._skip_state_save_on_close = False
         self._window_geometry_restored = False
+        self._native_user32 = None
+        self._native_window_handle: int | None = None
+        self._original_window_proc: int | None = None
+        self._window_proc_callback = None
         if not self._acquire_state_lock():
             messagebox.showwarning(
                 "程序已在运行",
@@ -2000,6 +2007,7 @@ class StockPriceApp(tk.Tk):
         self._schedule_market_cell_labels()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         _lock_main_window_controls(self)
+        self._install_title_icon_menu()
         if self._window_geometry_restored:
             self.deiconify()
         else:
@@ -2283,55 +2291,6 @@ class StockPriceApp(tk.Tk):
         self.code_entry.bind("<Down>", self._focus_suggestions)
         self.code_var.trace_add("write", self._on_query_changed)
 
-        def create_cloud_control(
-            text: str,
-            callback: Callable[[tk.Event], None],
-        ) -> tk.Label:
-            control = tk.Label(
-                input_frame,
-                text=text,
-                background=SURFACE,
-                foreground=TEXT_PRIMARY,
-                font=("Microsoft YaHei UI", 9),
-                padx=12,
-                pady=7,
-                borderwidth=1,
-                relief=tk.SOLID,
-                highlightthickness=0,
-                takefocus=False,
-                cursor="hand2",
-            )
-            control.bind("<Button-1>", callback)
-            control.bind(
-                "<Enter>",
-                lambda _event, widget=control: self._set_cloud_control_hover(
-                    widget, True
-                ),
-            )
-            control.bind(
-                "<Leave>",
-                lambda _event, widget=control: self._set_cloud_control_hover(
-                    widget, False
-                ),
-            )
-            return control
-
-        self.google_login_control = create_cloud_control(
-            "登录谷歌",
-            self._login_google_account,
-        )
-        self.google_login_control.pack(side=tk.LEFT, padx=(12, 0))
-        self.cloud_upload_control = create_cloud_control(
-            "上传云端",
-            self._upload_cloud_state,
-        )
-        self.cloud_upload_control.pack(side=tk.LEFT, padx=(8, 0))
-        self.cloud_download_control = create_cloud_control(
-            "同步云端",
-            self._download_cloud_state,
-        )
-        self.cloud_download_control.pack(side=tk.LEFT, padx=(8, 0))
-
         self.refresh_button = ttk.Button(
             input_frame,
             text="刷新全部",
@@ -2340,7 +2299,7 @@ class StockPriceApp(tk.Tk):
         )
         self.refresh_button.pack(side=tk.LEFT, padx=(14, 0))
 
-        self.suggestion_frame = ttk.Frame(outer, padding=(84, 0, 444, 8))
+        self.suggestion_frame = ttk.Frame(outer, padding=(84, 0, 136, 8))
         suggestion_border = tk.Frame(
             self.suggestion_frame,
             background=DIVIDER,
@@ -3485,6 +3444,227 @@ class StockPriceApp(tk.Tk):
             except OSError:
                 pass
 
+    def _install_title_icon_menu(self) -> None:
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            self.update_idletasks()
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.GetParent.argtypes = [wintypes.HWND]
+            user32.GetParent.restype = wintypes.HWND
+            user32.CallWindowProcW.argtypes = [
+                ctypes.c_void_p,
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            ]
+            user32.CallWindowProcW.restype = ctypes.c_ssize_t
+            user32.DefWindowProcW.argtypes = [
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            ]
+            user32.DefWindowProcW.restype = ctypes.c_ssize_t
+            set_window_proc = getattr(
+                user32,
+                "SetWindowLongPtrW",
+                user32.SetWindowLongW,
+            )
+            set_window_proc.argtypes = [
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_void_p,
+            ]
+            set_window_proc.restype = ctypes.c_void_p
+
+            window_handle = self.winfo_id()
+            top_level_handle = user32.GetParent(window_handle) or window_handle
+            callback_type = ctypes.WINFUNCTYPE(
+                ctypes.c_ssize_t,
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            )
+
+            def window_proc(
+                hwnd: int,
+                message: int,
+                w_param: int,
+                l_param: int,
+            ) -> int:
+                try:
+                    if message == 0x00A5 and int(w_param) == 3:
+                        self._show_title_icon_menu(hwnd, int(l_param))
+                        return 0
+                except Exception:
+                    pass
+                if self._original_window_proc is None:
+                    return int(
+                        user32.DefWindowProcW(
+                            hwnd,
+                            message,
+                            w_param,
+                            l_param,
+                        )
+                    )
+                return int(
+                    user32.CallWindowProcW(
+                        self._original_window_proc,
+                        hwnd,
+                        message,
+                        w_param,
+                        l_param,
+                    )
+                )
+
+            callback = callback_type(window_proc)
+            ctypes.set_last_error(0)
+            original_proc = set_window_proc(
+                top_level_handle,
+                -4,
+                ctypes.cast(callback, ctypes.c_void_p),
+            )
+            if not original_proc:
+                raise OSError(ctypes.get_last_error(), "无法替换窗口消息处理器")
+            self._native_user32 = user32
+            self._native_window_handle = int(top_level_handle)
+            self._original_window_proc = int(original_proc)
+            self._window_proc_callback = callback
+        except (AttributeError, OSError, tk.TclError) as exc:
+            self.status_var.set(f"左上角云端菜单初始化失败：{exc}")
+
+    def _restore_title_icon_menu(self) -> None:
+        if (
+            self._native_user32 is None
+            or self._native_window_handle is None
+            or self._original_window_proc is None
+        ):
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            set_window_proc = getattr(
+                self._native_user32,
+                "SetWindowLongPtrW",
+                self._native_user32.SetWindowLongW,
+            )
+            set_window_proc.argtypes = [
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_void_p,
+            ]
+            set_window_proc.restype = ctypes.c_void_p
+            set_window_proc(
+                self._native_window_handle,
+                -4,
+                self._original_window_proc,
+            )
+        except (AttributeError, OSError):
+            pass
+        finally:
+            self._native_user32 = None
+            self._native_window_handle = None
+            self._original_window_proc = None
+            self._window_proc_callback = None
+
+    def _show_title_icon_menu(self, hwnd: int, l_param: int) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = self._native_user32
+        if user32 is None:
+            return
+        user32.CreatePopupMenu.restype = wintypes.HMENU
+        user32.AppendMenuW.argtypes = [
+            wintypes.HMENU,
+            wintypes.UINT,
+            ctypes.c_size_t,
+            wintypes.LPCWSTR,
+        ]
+        user32.AppendMenuW.restype = wintypes.BOOL
+        user32.TrackPopupMenu.argtypes = [
+            wintypes.HMENU,
+            wintypes.UINT,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.HWND,
+            ctypes.c_void_p,
+        ]
+        user32.TrackPopupMenu.restype = wintypes.UINT
+        user32.DestroyMenu.argtypes = [wintypes.HMENU]
+        user32.DestroyMenu.restype = wintypes.BOOL
+
+        menu = user32.CreatePopupMenu()
+        if not menu:
+            return
+        item_flags = 0x0000
+        if self._cloud_syncing:
+            item_flags |= 0x0001 | 0x0002
+        try:
+            user32.AppendMenuW(
+                menu,
+                item_flags,
+                TITLE_ICON_MENU_LOGIN,
+                "登录谷歌",
+            )
+            user32.AppendMenuW(
+                menu,
+                item_flags,
+                TITLE_ICON_MENU_UPLOAD,
+                "上传云端",
+            )
+            user32.AppendMenuW(
+                menu,
+                item_flags,
+                TITLE_ICON_MENU_DOWNLOAD,
+                "同步云端",
+            )
+            packed_position = l_param & 0xFFFFFFFF
+            x_position = ctypes.c_short(packed_position & 0xFFFF).value
+            y_position = ctypes.c_short((packed_position >> 16) & 0xFFFF).value
+            user32.SetForegroundWindow(hwnd)
+            command = int(
+                user32.TrackPopupMenu(
+                    menu,
+                    0x0100 | 0x0002,
+                    x_position,
+                    y_position,
+                    0,
+                    hwnd,
+                    None,
+                )
+            )
+        finally:
+            user32.DestroyMenu(menu)
+            user32.PostMessageW(hwnd, 0x0000, 0, 0)
+        if command:
+            self.after_idle(
+                lambda selected=command: self._dispatch_title_icon_menu_command(
+                    selected
+                )
+            )
+
+    def _dispatch_title_icon_menu_command(self, command: int) -> None:
+        if self._cloud_syncing:
+            self.status_var.set("Google 授权或云端同步正在进行，请稍候。")
+            return
+        actions = {
+            TITLE_ICON_MENU_LOGIN: self._login_google_account,
+            TITLE_ICON_MENU_UPLOAD: self._upload_cloud_state,
+            TITLE_ICON_MENU_DOWNLOAD: self._download_cloud_state,
+        }
+        action = actions.get(command)
+        if action is not None:
+            action()
+
     def _on_close(self) -> None:
         if self._search_after_id is not None:
             self.after_cancel(self._search_after_id)
@@ -3508,32 +3688,12 @@ class StockPriceApp(tk.Tk):
             for trade_window in list(self._trade_windows.values()):
                 self._capture_trade_window_layout(trade_window)
             self._save_state()
+        self._restore_title_icon_menu()
         self._release_state_lock()
         self.destroy()
 
-    def _set_cloud_control_hover(
-        self,
-        control: tk.Label,
-        hovered: bool,
-    ) -> None:
-        if self._cloud_syncing:
-            return
-        control.configure(background=ACCENT_SOFT if hovered else SURFACE)
-
     def _set_cloud_sync_busy(self, busy: bool) -> None:
         self._cloud_syncing = busy
-        foreground = TEXT_SECONDARY if busy else TEXT_PRIMARY
-        cursor = "arrow" if busy else "hand2"
-        for control in (
-            self.google_login_control,
-            self.cloud_upload_control,
-            self.cloud_download_control,
-        ):
-            control.configure(
-                background=SURFACE,
-                foreground=foreground,
-                cursor=cursor,
-            )
 
     def _cloud_status_from_worker(self, status: str) -> None:
         self._result_queue.put(("cloud_status", status))
@@ -4997,7 +5157,6 @@ class StockPriceApp(tk.Tk):
                         self.status_var.set(message[1])
                 elif kind == "cloud_login_done":
                     self._set_cloud_sync_busy(False)
-                    self.google_login_control.configure(text="谷歌已登录")
                     self.status_var.set("Google 账户授权成功。")
                     messagebox.showinfo(
                         "登录成功",
