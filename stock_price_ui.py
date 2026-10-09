@@ -16,6 +16,7 @@ import threading
 import tkinter as tk
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -36,7 +37,14 @@ from stock_price import (
 )
 
 
-PROVIDER_NAMES = ["yahoo", "tencent", "sina"]
+PRIMARY_PROVIDER_BY_MARKET = {"US": "yahoo", "HK": "tencent"}
+FALLBACK_PROVIDERS_BY_MARKET = {
+    "US": ["tencent", "sina"],
+    "HK": ["yahoo", "sina"],
+}
+REFRESH_REQUEST_TIMEOUT_SECONDS = 2.5
+REFRESH_EXCHANGE_RATE_TIMEOUT_SECONDS = 5.0
+REFRESH_MAX_WORKERS = 8
 MARKET_ORDER = ("US", "HK")
 MARKET_TITLES = {"US": "美股", "HK": "港股"}
 STATISTICS_PAGE = "STATS"
@@ -4601,18 +4609,54 @@ class StockPriceApp(tk.Tk):
         worker.start()
 
     def _refresh_worker(self, symbols: list[StockSymbol]) -> None:
-        try:
-            rates = fetch_exchange_rates(timeout=12.0)
-            self._result_queue.put(("exchange_rates", rates))
-        except Exception as exc:
-            self._result_queue.put(("exchange_rate_error", str(exc)))
-        for symbol in symbols:
-            try:
-                quotes, errors = fetch_quotes(symbol, PROVIDER_NAMES, timeout=12.0)
-                self._result_queue.put(("quote", symbol, quotes, errors))
-            except Exception as exc:
-                self._result_queue.put(("error", symbol, str(exc)))
+        worker_count = min(REFRESH_MAX_WORKERS, max(1, len(symbols) + 1))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_map = {
+                executor.submit(
+                    fetch_exchange_rates,
+                    REFRESH_EXCHANGE_RATE_TIMEOUT_SECONDS,
+                ): ("exchange_rates", None)
+            }
+            for symbol in symbols:
+                future = executor.submit(self._fetch_refresh_quotes, symbol)
+                future_map[future] = ("quote", symbol)
+
+            for future in as_completed(future_map):
+                kind, symbol = future_map[future]
+                try:
+                    result = future.result()
+                    if kind == "exchange_rates":
+                        self._result_queue.put(("exchange_rates", result))
+                    else:
+                        quotes, errors = result
+                        self._result_queue.put(("quote", symbol, quotes, errors))
+                except Exception as exc:
+                    if kind == "exchange_rates":
+                        self._result_queue.put(("exchange_rate_error", str(exc)))
+                    else:
+                        self._result_queue.put(("error", symbol, str(exc)))
         self._result_queue.put(("done", len(symbols), datetime.now()))
+
+    @staticmethod
+    def _fetch_refresh_quotes(
+        symbol: StockSymbol,
+    ) -> tuple[list[PriceQuote], dict[str, str]]:
+        primary = PRIMARY_PROVIDER_BY_MARKET[symbol.market]
+        quotes, errors = fetch_quotes(
+            symbol,
+            [primary],
+            timeout=REFRESH_REQUEST_TIMEOUT_SECONDS,
+        )
+        if quotes:
+            return quotes, errors
+
+        fallback_quotes, fallback_errors = fetch_quotes(
+            symbol,
+            FALLBACK_PROVIDERS_BY_MARKET[symbol.market],
+            timeout=REFRESH_REQUEST_TIMEOUT_SECONDS,
+        )
+        errors.update(fallback_errors)
+        return fallback_quotes, errors
 
     def _process_result_queue(self) -> None:
         try:

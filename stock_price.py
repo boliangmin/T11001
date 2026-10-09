@@ -132,7 +132,8 @@ def normalize_symbol(raw: str) -> StockSymbol:
             market="HK",
             canonical=f"HK.{hkex_code}",
             yahoo=f"{yahoo_code}.HK",
-            tencent=f"hk{hkex_code}",
+            # r_hk 前缀返回港股当前公开行情；hk 前缀会返回延迟行情。
+            tencent=f"r_hk{hkex_code}",
             sina=f"hk{hkex_code}",
             default_currency="HKD",
         )
