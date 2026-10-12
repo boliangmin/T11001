@@ -71,6 +71,35 @@ class _DataBlob(ctypes.Structure):
     ]
 
 
+def _windows_data_protection_api() -> tuple[object, object]:
+    blob_pointer = ctypes.POINTER(_DataBlob)
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    crypt32.CryptProtectData.argtypes = [
+        blob_pointer,
+        wintypes.LPCWSTR,
+        blob_pointer,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        blob_pointer,
+    ]
+    crypt32.CryptProtectData.restype = wintypes.BOOL
+    crypt32.CryptUnprotectData.argtypes = [
+        blob_pointer,
+        ctypes.POINTER(wintypes.LPWSTR),
+        blob_pointer,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        blob_pointer,
+    ]
+    crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    return crypt32, kernel32
+
+
 def _local_app_data_dir() -> Path:
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
@@ -122,7 +151,7 @@ def _chrome_executable() -> Path:
         if candidate.is_file():
             return candidate.resolve()
     raise CloudSyncError(
-        "未找到 Google Chrome。请先安装 Chrome，再点击“登录谷歌”。"
+        "未找到 Google Chrome。请先安装 Chrome，再重新执行云端操作。"
     )
 
 
@@ -178,8 +207,8 @@ def _protect_for_current_windows_user(data: bytes) -> bytes:
         ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte)),
     )
     output_blob = _DataBlob()
-    crypt32 = ctypes.windll.crypt32
-    kernel32 = ctypes.windll.kernel32
+    crypt32, kernel32 = _windows_data_protection_api()
+    ctypes.set_last_error(0)
     if not crypt32.CryptProtectData(
         ctypes.byref(input_blob),
         "TradeView Google OAuth",
@@ -193,7 +222,10 @@ def _protect_for_current_windows_user(data: bytes) -> bytes:
     try:
         return ctypes.string_at(output_blob.pbData, output_blob.cbData)
     finally:
-        kernel32.LocalFree(output_blob.pbData)
+        if output_blob.pbData:
+            kernel32.LocalFree(
+                ctypes.cast(output_blob.pbData, ctypes.c_void_p)
+            )
 
 
 def _unprotect_for_current_windows_user(data: bytes) -> bytes:
@@ -205,8 +237,8 @@ def _unprotect_for_current_windows_user(data: bytes) -> bytes:
         ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte)),
     )
     output_blob = _DataBlob()
-    crypt32 = ctypes.windll.crypt32
-    kernel32 = ctypes.windll.kernel32
+    crypt32, kernel32 = _windows_data_protection_api()
+    ctypes.set_last_error(0)
     if not crypt32.CryptUnprotectData(
         ctypes.byref(input_blob),
         None,
@@ -220,7 +252,10 @@ def _unprotect_for_current_windows_user(data: bytes) -> bytes:
     try:
         return ctypes.string_at(output_blob.pbData, output_blob.cbData)
     finally:
-        kernel32.LocalFree(output_blob.pbData)
+        if output_blob.pbData:
+            kernel32.LocalFree(
+                ctypes.cast(output_blob.pbData, ctypes.c_void_p)
+            )
 
 
 def _token_path() -> Path:
@@ -509,14 +544,21 @@ class GoogleDriveSyncClient:
         status_callback: Callable[[str], None] | None = None,
         *,
         force_interactive_authorization: bool = False,
+        authorize_if_needed: bool = False,
     ) -> None:
         self._status_callback = status_callback
         self._config = _load_oauth_config()
         self._access_token = self._get_access_token(
-            force_interactive_authorization=force_interactive_authorization
+            force_interactive_authorization=force_interactive_authorization,
+            authorize_if_needed=authorize_if_needed,
         )
 
-    def _get_access_token(self, *, force_interactive_authorization: bool) -> str:
+    def _get_access_token(
+        self,
+        *,
+        force_interactive_authorization: bool,
+        authorize_if_needed: bool,
+    ) -> str:
         if force_interactive_authorization:
             token = _authorize_interactively(
                 self._config,
@@ -535,10 +577,20 @@ class GoogleDriveSyncClient:
                 refreshed = _refresh_access_token(self._config, token)
                 return str(refreshed["access_token"])
             except CloudSyncError as exc:
-                if "invalid_grant" not in str(exc) and "没有刷新令牌" not in str(exc):
+                if (
+                    "invalid_grant" not in str(exc)
+                    and "没有刷新令牌" not in str(exc)
+                ):
                     raise
+        if authorize_if_needed:
+            token = _authorize_interactively(
+                self._config,
+                timeout=300.0,
+                status_callback=self._status_callback,
+            )
+            return str(token["access_token"])
         raise CloudSyncError(
-            "尚未登录 Google。请先点击“登录谷歌”，在 Chrome 中完成授权。"
+            "尚未登录 Google。"
         )
 
     def verify_access(self) -> None:

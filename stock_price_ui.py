@@ -85,9 +85,9 @@ DEFAULT_COLUMN_WIDTHS = {
 }
 MAIN_WINDOW_SIZE = (1256, 768)
 PASSWORD_WINDOW_SIZE = (380, 210)
-TITLE_ICON_MENU_LOGIN = 0x5101
 TITLE_ICON_MENU_UPLOAD = 0x5102
 TITLE_ICON_MENU_DOWNLOAD = 0x5103
+TITLE_ICON_SUBCLASS_ID = 0x54564D4E
 MIN_MARKET_COLUMN_WIDTH = 60
 MARKET_ROW_HEIGHT = 32
 MARKET_SPACER_PREFIX = "__market_spacer__"
@@ -1944,9 +1944,10 @@ class StockPriceApp(tk.Tk):
         self._skip_state_save_on_close = False
         self._window_geometry_restored = False
         self._native_user32 = None
+        self._native_comctl32 = None
         self._native_window_handle: int | None = None
-        self._original_window_proc: int | None = None
-        self._window_proc_callback = None
+        self._window_subclass_callback = None
+        self._window_subclass_installed = False
         if not self._acquire_state_lock():
             messagebox.showwarning(
                 "程序已在运行",
@@ -2010,12 +2011,12 @@ class StockPriceApp(tk.Tk):
         self._schedule_market_cell_labels()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         _lock_main_window_controls(self)
-        self._install_title_icon_menu()
         if self._window_geometry_restored:
             self.deiconify()
         else:
             _center_and_show(self, fit_content=False)
         self.update_idletasks()
+        self._install_title_icon_menu()
         self._fit_market_columns_to_viewport()
         self._queue_after_id = self.after(100, self._process_result_queue)
         if self._startup_refresh_after_id is None:
@@ -3456,69 +3457,63 @@ class StockPriceApp(tk.Tk):
 
             self.update_idletasks()
             user32 = ctypes.WinDLL("user32", use_last_error=True)
+            comctl32 = ctypes.WinDLL("comctl32", use_last_error=True)
             user32.GetParent.argtypes = [wintypes.HWND]
             user32.GetParent.restype = wintypes.HWND
-            user32.CallWindowProcW.argtypes = [
-                ctypes.c_void_p,
+            comctl32.DefSubclassProc.argtypes = [
                 wintypes.HWND,
                 wintypes.UINT,
                 wintypes.WPARAM,
                 wintypes.LPARAM,
             ]
-            user32.CallWindowProcW.restype = ctypes.c_ssize_t
-            user32.DefWindowProcW.argtypes = [
-                wintypes.HWND,
-                wintypes.UINT,
-                wintypes.WPARAM,
-                wintypes.LPARAM,
-            ]
-            user32.DefWindowProcW.restype = ctypes.c_ssize_t
-            set_window_proc = getattr(
-                user32,
-                "SetWindowLongPtrW",
-                user32.SetWindowLongW,
-            )
-            set_window_proc.argtypes = [
-                wintypes.HWND,
-                ctypes.c_int,
-                ctypes.c_void_p,
-            ]
-            set_window_proc.restype = ctypes.c_void_p
-
-            window_handle = self.winfo_id()
-            top_level_handle = user32.GetParent(window_handle) or window_handle
-            callback_type = ctypes.WINFUNCTYPE(
+            comctl32.DefSubclassProc.restype = ctypes.c_ssize_t
+            subclass_callback_type = ctypes.WINFUNCTYPE(
                 ctypes.c_ssize_t,
                 wintypes.HWND,
                 wintypes.UINT,
                 wintypes.WPARAM,
                 wintypes.LPARAM,
+                ctypes.c_size_t,
+                ctypes.c_size_t,
             )
+            comctl32.SetWindowSubclass.argtypes = [
+                wintypes.HWND,
+                subclass_callback_type,
+                ctypes.c_size_t,
+                ctypes.c_size_t,
+            ]
+            comctl32.SetWindowSubclass.restype = wintypes.BOOL
+            comctl32.RemoveWindowSubclass.argtypes = [
+                wintypes.HWND,
+                subclass_callback_type,
+                ctypes.c_size_t,
+            ]
+            comctl32.RemoveWindowSubclass.restype = wintypes.BOOL
 
-            def window_proc(
+            window_handle = self.winfo_id()
+            top_level_handle = user32.GetParent(window_handle) or window_handle
+
+            def subclass_proc(
                 hwnd: int,
                 message: int,
                 w_param: int,
                 l_param: int,
+                _subclass_id: int,
+                _reference_data: int,
             ) -> int:
                 try:
-                    if message == 0x00A5 and int(w_param) == 3:
+                    if self._is_title_bar_menu_request(
+                        hwnd,
+                        message,
+                        int(w_param),
+                        int(l_param),
+                    ):
                         self._show_title_icon_menu(hwnd, int(l_param))
                         return 0
                 except Exception:
                     pass
-                if self._original_window_proc is None:
-                    return int(
-                        user32.DefWindowProcW(
-                            hwnd,
-                            message,
-                            w_param,
-                            l_param,
-                        )
-                    )
                 return int(
-                    user32.CallWindowProcW(
-                        self._original_window_proc,
+                    comctl32.DefSubclassProc(
                         hwnd,
                         message,
                         w_param,
@@ -3526,56 +3521,73 @@ class StockPriceApp(tk.Tk):
                     )
                 )
 
-            callback = callback_type(window_proc)
+            callback = subclass_callback_type(subclass_proc)
             ctypes.set_last_error(0)
-            original_proc = set_window_proc(
+            if not comctl32.SetWindowSubclass(
                 top_level_handle,
-                -4,
-                ctypes.cast(callback, ctypes.c_void_p),
-            )
-            if not original_proc:
-                raise OSError(ctypes.get_last_error(), "无法替换窗口消息处理器")
+                callback,
+                TITLE_ICON_SUBCLASS_ID,
+                0,
+            ):
+                raise OSError(ctypes.get_last_error(), "无法安装窗口消息子类")
             self._native_user32 = user32
+            self._native_comctl32 = comctl32
             self._native_window_handle = int(top_level_handle)
-            self._original_window_proc = int(original_proc)
-            self._window_proc_callback = callback
+            self._window_subclass_callback = callback
+            self._window_subclass_installed = True
         except (AttributeError, OSError, tk.TclError) as exc:
             self.status_var.set(f"左上角云端菜单初始化失败：{exc}")
 
     def _restore_title_icon_menu(self) -> None:
         if (
-            self._native_user32 is None
+            self._native_comctl32 is None
             or self._native_window_handle is None
-            or self._original_window_proc is None
+            or self._window_subclass_callback is None
+            or not self._window_subclass_installed
         ):
             return
         try:
-            import ctypes
-            from ctypes import wintypes
-
-            set_window_proc = getattr(
-                self._native_user32,
-                "SetWindowLongPtrW",
-                self._native_user32.SetWindowLongW,
-            )
-            set_window_proc.argtypes = [
-                wintypes.HWND,
-                ctypes.c_int,
-                ctypes.c_void_p,
-            ]
-            set_window_proc.restype = ctypes.c_void_p
-            set_window_proc(
+            self._native_comctl32.RemoveWindowSubclass(
                 self._native_window_handle,
-                -4,
-                self._original_window_proc,
+                self._window_subclass_callback,
+                TITLE_ICON_SUBCLASS_ID,
             )
         except (AttributeError, OSError):
             pass
         finally:
-            self._native_user32 = None
-            self._native_window_handle = None
-            self._original_window_proc = None
-            self._window_proc_callback = None
+            self._window_subclass_installed = False
+
+    def _is_title_bar_menu_request(
+        self,
+        hwnd: int,
+        message: int,
+        w_param: int,
+        l_param: int,
+    ) -> bool:
+        if message == 0x00A5:
+            return w_param in {2, 3}
+        if message != 0x007B:
+            return False
+        if l_param == -1:
+            return False
+        return self._point_is_in_title_bar(hwnd, l_param)
+
+    def _point_is_in_title_bar(self, hwnd: int, l_param: int) -> bool:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = self._native_user32
+        if user32 is None:
+            return False
+        user32.SendMessageW.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        user32.SendMessageW.restype = ctypes.c_ssize_t
+        hit_test = int(user32.SendMessageW(hwnd, 0x0084, 0, l_param))
+        return hit_test in {2, 3}
 
     def _show_title_icon_menu(self, hwnd: int, l_param: int) -> None:
         import ctypes
@@ -3584,6 +3596,7 @@ class StockPriceApp(tk.Tk):
         user32 = self._native_user32
         if user32 is None:
             return
+        user32.CreatePopupMenu.argtypes = []
         user32.CreatePopupMenu.restype = wintypes.HMENU
         user32.AppendMenuW.argtypes = [
             wintypes.HMENU,
@@ -3604,6 +3617,15 @@ class StockPriceApp(tk.Tk):
         user32.TrackPopupMenu.restype = wintypes.UINT
         user32.DestroyMenu.argtypes = [wintypes.HMENU]
         user32.DestroyMenu.restype = wintypes.BOOL
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+        user32.PostMessageW.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        user32.PostMessageW.restype = wintypes.BOOL
 
         menu = user32.CreatePopupMenu()
         if not menu:
@@ -3615,20 +3637,14 @@ class StockPriceApp(tk.Tk):
             user32.AppendMenuW(
                 menu,
                 item_flags,
-                TITLE_ICON_MENU_LOGIN,
-                "登录谷歌",
-            )
-            user32.AppendMenuW(
-                menu,
-                item_flags,
                 TITLE_ICON_MENU_UPLOAD,
-                "上传云端",
+                "同步到云端",
             )
             user32.AppendMenuW(
                 menu,
                 item_flags,
                 TITLE_ICON_MENU_DOWNLOAD,
-                "同步云端",
+                "从云端恢复",
             )
             packed_position = l_param & 0xFFFFFFFF
             x_position = ctypes.c_short(packed_position & 0xFFFF).value
@@ -3649,18 +3665,13 @@ class StockPriceApp(tk.Tk):
             user32.DestroyMenu(menu)
             user32.PostMessageW(hwnd, 0x0000, 0, 0)
         if command:
-            self.after_idle(
-                lambda selected=command: self._dispatch_title_icon_menu_command(
-                    selected
-                )
-            )
+            self._result_queue.put(("title_icon_menu_command", command))
 
     def _dispatch_title_icon_menu_command(self, command: int) -> None:
         if self._cloud_syncing:
             self.status_var.set("Google 授权或云端同步正在进行，请稍候。")
             return
         actions = {
-            TITLE_ICON_MENU_LOGIN: self._login_google_account,
             TITLE_ICON_MENU_UPLOAD: self._upload_cloud_state,
             TITLE_ICON_MENU_DOWNLOAD: self._download_cloud_state,
         }
@@ -3701,28 +3712,6 @@ class StockPriceApp(tk.Tk):
     def _cloud_status_from_worker(self, status: str) -> None:
         self._result_queue.put(("cloud_status", status))
 
-    def _login_google_account(self, _event: tk.Event | None = None) -> None:
-        if self._cloud_syncing:
-            self.status_var.set("Google 授权或云端同步正在进行，请稍候。")
-            return
-        self._set_cloud_sync_busy(True)
-        self.status_var.set("正在启动 Google Chrome……")
-        threading.Thread(
-            target=self._google_login_worker,
-            daemon=True,
-        ).start()
-
-    def _google_login_worker(self) -> None:
-        try:
-            client = GoogleDriveSyncClient(
-                self._cloud_status_from_worker,
-                force_interactive_authorization=True,
-            )
-            client.verify_access()
-            self._result_queue.put(("cloud_login_done",))
-        except Exception as exc:
-            self._result_queue.put(("cloud_error", "登录谷歌", str(exc)))
-
     @staticmethod
     def _format_cloud_time(value: str) -> str:
         try:
@@ -3737,17 +3726,17 @@ class StockPriceApp(tk.Tk):
             self.status_var.set("云端同步正在进行，请稍候。")
             return
         if not messagebox.askyesno(
-            "上传云端",
-            "将把本机的完整状态上传到 Google Drive，并覆盖当前云端快照。\n\n"
-            "上传内容包括股票、交易记录、T 交易、出入金、窗口位置、"
+            "同步到云端",
+            "将把本机的完整状态同步到 Google Drive，并覆盖当前云端快照。\n\n"
+            "同步内容包括股票、交易记录、T 交易、出入金、窗口位置、"
             "列宽和当前页面。是否继续？",
             parent=self,
         ):
             return
         if not self._save_state():
             messagebox.showerror(
-                "上传失败",
-                "本地状态保存失败，未开始上传。",
+                "同步失败",
+                "本地状态保存失败，未开始同步到云端。",
                 parent=self,
             )
             return
@@ -3755,13 +3744,13 @@ class StockPriceApp(tk.Tk):
             state_bytes = self._state_path.read_bytes()
         except OSError as exc:
             messagebox.showerror(
-                "上传失败",
+                "同步失败",
                 f"无法读取本地状态：{exc}",
                 parent=self,
             )
             return
         self._set_cloud_sync_busy(True)
-        self.status_var.set("正在准备 Google Drive 云端上传……")
+        self.status_var.set("正在准备将状态同步到 Google Drive……")
         threading.Thread(
             target=self._cloud_upload_worker,
             args=(state_bytes,),
@@ -3770,36 +3759,39 @@ class StockPriceApp(tk.Tk):
 
     def _cloud_upload_worker(self, state_bytes: bytes) -> None:
         try:
-            client = GoogleDriveSyncClient(self._cloud_status_from_worker)
+            client = GoogleDriveSyncClient(
+                self._cloud_status_from_worker,
+                authorize_if_needed=True,
+            )
             info = client.upload_state(state_bytes)
             self._result_queue.put(("cloud_upload_done", info))
         except Exception as exc:
-            self._result_queue.put(("cloud_error", "上传云端", str(exc)))
+            self._result_queue.put(("cloud_error", "同步到云端", str(exc)))
 
     def _download_cloud_state(self, _event: tk.Event | None = None) -> None:
         if self._cloud_syncing:
             self.status_var.set("云端同步正在进行，请稍候。")
             return
         if self._refreshing:
-            self.status_var.set("请等待行情刷新完成后再同步云端。")
+            self.status_var.set("请等待行情刷新完成后再从云端恢复。")
             return
         if not messagebox.askyesno(
-            "同步云端",
+            "从云端恢复",
             "将下载 Google Drive 中的完整状态，备份本地状态后用云端内容"
-            "全部替换。\n\n同步成功后程序会自动关闭，请重新打开以载入云端信息。"
+            "全部替换。\n\n恢复成功后程序会自动关闭，请重新打开以载入云端信息。"
             "是否继续？",
             parent=self,
         ):
             return
         if not self._save_state():
             messagebox.showerror(
-                "同步失败",
-                "本地状态保存失败，未开始下载。",
+                "恢复失败",
+                "本地状态保存失败，未开始从云端恢复。",
                 parent=self,
             )
             return
         self._set_cloud_sync_busy(True)
-        self.status_var.set("正在准备 Google Drive 云端同步……")
+        self.status_var.set("正在准备从 Google Drive 云端恢复……")
         threading.Thread(
             target=self._cloud_download_worker,
             daemon=True,
@@ -3807,11 +3799,14 @@ class StockPriceApp(tk.Tk):
 
     def _cloud_download_worker(self) -> None:
         try:
-            client = GoogleDriveSyncClient(self._cloud_status_from_worker)
+            client = GoogleDriveSyncClient(
+                self._cloud_status_from_worker,
+                authorize_if_needed=True,
+            )
             state_bytes, info = client.download_state()
             self._result_queue.put(("cloud_download_ready", state_bytes, info))
         except Exception as exc:
-            self._result_queue.put(("cloud_error", "同步云端", str(exc)))
+            self._result_queue.put(("cloud_error", "从云端恢复", str(exc)))
 
     def _apply_downloaded_cloud_state(
         self,
@@ -3835,9 +3830,9 @@ class StockPriceApp(tk.Tk):
             temporary_path.replace(self._state_path)
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             self._set_cloud_sync_busy(False)
-            self.status_var.set(f"同步云端失败：{exc}")
+            self.status_var.set(f"从云端恢复失败：{exc}")
             messagebox.showerror(
-                "同步失败",
+                "恢复失败",
                 f"无法替换本地状态：{exc}",
                 parent=self,
             )
@@ -3851,10 +3846,10 @@ class StockPriceApp(tk.Tk):
         self._skip_state_save_on_close = True
         uploaded_time = self._format_cloud_time(info.uploaded_at)
         backup_text = str(backup_path) if backup_path is not None else "无"
-        self.status_var.set("云端状态已写入，程序即将关闭。")
+        self.status_var.set("云端状态已恢复，程序即将关闭。")
         messagebox.showinfo(
-            "同步完成",
-            f"已同步云端版本 {info.revision}（{uploaded_time}）。\n"
+            "恢复完成",
+            f"已从云端恢复版本 {info.revision}（{uploaded_time}）。\n"
             f"本地备份：{backup_text}\n\n程序将关闭，请重新打开。",
             parent=self,
         )
@@ -5155,27 +5150,22 @@ class StockPriceApp(tk.Tk):
                         self._suggestions = []
                         self._hide_suggestions()
                         self.status_var.set(f"搜索失败：{error}")
+                elif kind == "title_icon_menu_command":
+                    _, command = message
+                    self._dispatch_title_icon_menu_command(command)
                 elif kind == "cloud_status":
                     if self._cloud_syncing:
                         self.status_var.set(message[1])
-                elif kind == "cloud_login_done":
-                    self._set_cloud_sync_busy(False)
-                    self.status_var.set("Google 账户授权成功。")
-                    messagebox.showinfo(
-                        "登录成功",
-                        "Google 账户已完成授权，现在可以上传或同步云端。",
-                        parent=self,
-                    )
                 elif kind == "cloud_upload_done":
                     _, info = message
                     self._set_cloud_sync_busy(False)
                     uploaded_time = self._format_cloud_time(info.uploaded_at)
                     self.status_var.set(
-                        f"完整状态已上传到 Google Drive · 版本 {info.revision}"
+                        f"完整状态已同步到 Google Drive · 版本 {info.revision}"
                     )
                     messagebox.showinfo(
-                        "上传完成",
-                        f"完整状态已上传到 Google Drive。\n"
+                        "同步完成",
+                        f"完整状态已同步到 Google Drive。\n"
                         f"云端版本：{info.revision}\n上传时间：{uploaded_time}",
                         parent=self,
                     )

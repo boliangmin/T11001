@@ -1,5 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+import tkinter as tk
+
+
+try:
+    tcl_probe = tk.Tcl()
+    tcl_library = Path(tcl_probe.eval("info library"))
+    tk_library = tcl_library.parent / f"tk{tk.TkVersion}"
+    if not (tk_library / "tk.tcl").is_file():
+        raise FileNotFoundError(tk_library / "tk.tcl")
+except (OSError, tk.TclError) as exc:
+    raise RuntimeError(
+        "PyInstaller requires a usable Tcl/Tk runtime; "
+        "do not build trade_view.exe in a restricted sandbox."
+    ) from exc
+
 
 a = Analysis(
     ["stock_price_ui.py"],
