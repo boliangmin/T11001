@@ -37,6 +37,9 @@ state.json.*
 # Agent verification temp files stay inside the project and are never committed.
 /.agent_tmp/
 
+# Local improvement backlog may describe unfixed security issues; never committed.
+/待改进项目.md
+
 # Local trading-data exports must never be committed, in any directory.
 20????????????.json
 20????????????_*交易同步*.json
