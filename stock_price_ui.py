@@ -278,13 +278,7 @@ def _fit_column_widths_to_total(
 def _default_state_path() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().with_name("state.json")
-    source_state_path = Path(__file__).resolve().with_name("state.json")
-    if source_state_path.is_file():
-        return source_state_path
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        return Path(local_app_data) / "StockPriceViewer" / "state.json"
-    return Path.home() / ".stock_price_viewer" / "state.json"
+    return Path(__file__).resolve().with_name("state.json")
 
 
 def _contains_chinese(value: str) -> bool:
