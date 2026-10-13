@@ -14,7 +14,7 @@
 
 1. 环境变量 `TRADE_VIEW_GOOGLE_OAUTH_CLIENT_FILE` 指向的文件。
 2. `%LOCALAPPDATA%\StockPriceViewer\google_oauth_client.json`。
-3. `trade_view.exe` 所在目录下的 `google_oauth_client.json`。
+3. 程序所在目录下的 `google_oauth_client.json`（源码运行时即当前工程目录）。
 
 真实客户端 JSON 已被 `.gitignore` 排除，禁止提交到仓库。仓库中的 `google_oauth_client.example.json` 仅用于展示格式。
 

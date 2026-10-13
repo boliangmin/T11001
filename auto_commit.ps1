@@ -53,7 +53,8 @@ $repoRoot = $repoRoot | Select-Object -First 1
 Set-Location $repoRoot
 
 $statePath = Join-Path $repoRoot ".auto_commit_state.json"
-$messagePath = Join-Path ([System.IO.Path]::GetTempPath()) ("T11005_commit_message_{0}.tmp" -f ([guid]::NewGuid().ToString("N")))
+$gitDir = Invoke-GitCapture -Arguments @("rev-parse", "--absolute-git-dir") | Select-Object -First 1
+$messagePath = Join-Path $gitDir ("T11005_commit_message_{0}.tmp" -f ([guid]::NewGuid().ToString("N")))
 $pendingStatus = Invoke-GitCapture -Arguments @("status", "--short")
 if (-not $pendingStatus) {
     Write-Host "No changes to commit."

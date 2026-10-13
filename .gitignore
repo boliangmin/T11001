@@ -25,6 +25,9 @@ google_oauth_token.bin
 state.json
 state.json.bak.*
 
+# Agent verification temp files stay inside the project and are never committed.
+/.agent_tmp/
+
 # Local trading-data exports must never be committed.
 /20????????????.json
 /20????????????_*交易同步*.json
