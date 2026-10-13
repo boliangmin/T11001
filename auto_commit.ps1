@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)]
     [string]$Content,
 
@@ -31,6 +31,12 @@ function Invoke-GitCapture {
         throw "git $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
     }
     return $output
+}
+
+function Write-AutoCommitState {
+    param([string]$Path, [int]$NextNumber)
+    $json = "{`r`n  `"prefix`": `"T11005`",`r`n  `"nextNumber`": $NextNumber`r`n}`r`n"
+    [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
 }
 
 function Split-Values {
@@ -117,8 +123,7 @@ $readmeUpdated = $normalizedReadme.Substring(0, $bodyStart) + "`n" +
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 try {
-    @{ prefix = "T11005"; nextNumber = $nextNumber + 1 } |
-        ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
+    Write-AutoCommitState -Path $statePath -NextNumber ($nextNumber + 1)
     [System.IO.File]::WriteAllText($readmePath, $readmeUpdated, $utf8NoBom)
     [System.IO.File]::WriteAllLines($messagePath, $messageLines, $utf8NoBom)
     if ($normalizedPaths.Count -gt 0) {
@@ -130,8 +135,7 @@ try {
 }
 catch {
     if ($stateExisted) {
-        @{ prefix = "T11005"; nextNumber = $nextNumber } |
-            ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
+        Write-AutoCommitState -Path $statePath -NextNumber $nextNumber
     }
     else { Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue }
     [System.IO.File]::WriteAllText($readmePath, $readmeOriginal, $utf8NoBom)

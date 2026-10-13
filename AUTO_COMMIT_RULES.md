@@ -18,6 +18,7 @@
 - 无额外备注时，`Remark` 使用默认值 `NULL`
 - 自动提交只创建本地提交，不执行 `git push`
 - 提交信息临时文件写入仓库 `.git` 目录并在提交后删除，脚本不在工程目录外生成文件
+- `auto_commit.ps1` 必须保存为带 BOM 的 UTF-8；缺少 BOM 时 Windows PowerShell 5.1 会按系统代码页读取中文并报语法错误
 
 ## README 记录规则
 

@@ -18,17 +18,26 @@ env/
 .DS_Store
 Thumbs.db
 
-google_oauth_client.json
-client_secret_*.json
-google_oauth_token.bin
+# Google OAuth client configs and tokens, including renamed copies and backups.
+google_oauth_client*.json
+!google_oauth_client.example.json
+client_secret*.json
+google_oauth_token*
 
-state.json
-state.json.bak.*
+# Local trading state, including copies, backups, temporary saves and lock files.
+state*.json
+state.json.*
+
+# Private keys and certificate bundles.
+*.pem
+*.key
+*.p12
+*.pfx
 
 # Agent verification temp files stay inside the project and are never committed.
 /.agent_tmp/
 
-# Local trading-data exports must never be committed.
-/20????????????.json
-/20????????????_*交易同步*.json
-/20??-??-??*交易记录*.html
+# Local trading-data exports must never be committed, in any directory.
+20????????????.json
+20????????????_*交易同步*.json
+20??-??-??*交易记录*.html
