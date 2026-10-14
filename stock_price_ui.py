@@ -151,6 +151,12 @@ PASSWORD_HASH_SALT = bytes.fromhex("9f3b7d2c4a8165e0b1d6c8f2047a9e35")
 PASSWORD_HASH_DIGEST = bytes.fromhex(
     "5943ce25a58ba7a6b4a0a555a2b9035736cc74f62bc414c60eea897b8d8e7259"
 )
+PUT_WARRANT_MATURITY_PATTERN = re.compile(r"@EP(\d{2})(0[1-9]|1[0-2])", re.I)
+PUT_WARRANT_CHINESE_PATTERN = re.compile(
+    r"([零〇一二三四五六七八九])([一二三四五六七八九十甲乙])沽"
+)
+CHINESE_WARRANT_DIGITS = "零一二三四五六七八九"
+CHINESE_WARRANT_MONTHS = "一二三四五六七八九十甲乙"
 
 
 def _verify_password(password: str) -> bool:
@@ -283,6 +289,49 @@ def _default_state_path() -> Path:
 
 def _contains_chinese(value: str) -> bool:
     return any("\u3400" <= character <= "\u9fff" for character in value)
+
+
+def _put_warrant_maturity_month(
+    quotes: list[PriceQuote],
+) -> tuple[int, int] | None:
+    for quote in quotes:
+        match = PUT_WARRANT_MATURITY_PATTERN.search(quote.name.strip())
+        if match is not None:
+            return 2000 + int(match.group(1)), int(match.group(2))
+    current_year = date.today().year
+    for quote in quotes:
+        match = PUT_WARRANT_CHINESE_PATTERN.search(quote.name.strip())
+        if match is None:
+            continue
+        year_digit = (
+            0
+            if match.group(1) == "〇"
+            else CHINESE_WARRANT_DIGITS.index(match.group(1))
+        )
+        year = current_year // 10 * 10 + year_digit
+        if year < current_year - 1:
+            year += 10
+        if year > current_year + 5:
+            continue
+        month = CHINESE_WARRANT_MONTHS.index(match.group(2)) + 1
+        return year, month
+    return None
+
+
+def _format_remaining_validity(
+    maturity: tuple[int, int],
+    current_date: date | None = None,
+) -> str:
+    year, month = maturity
+    today = current_date or date.today()
+    remaining_months = (year - today.year) * 12 + month - today.month
+    if remaining_months < 0:
+        remaining_text = "已到期"
+    elif remaining_months == 0:
+        remaining_text = "本月到期"
+    else:
+        remaining_text = f"约{remaining_months}个月"
+    return f"剩余有效期：{remaining_text}（{year}年{month}月到期）"
 
 
 def _metric_color(value: str) -> str:
@@ -1963,6 +2012,7 @@ class StockPriceApp(tk.Tk):
         self.trade_column_widths = DEFAULT_TRADE_COLUMN_WIDTHS.copy()
         self.show_closed_positions = {market: True for market in MARKET_ORDER}
         self.current_prices: dict[str, tuple[Decimal, str]] = {}
+        self.put_warrant_maturity_months: dict[str, tuple[int, int]] = {}
         self.exchange_rates: ExchangeRates | None = None
         self.exchange_rate_warning = ""
         self.last_refresh_time: datetime | None = None
@@ -2445,17 +2495,28 @@ class StockPriceApp(tk.Tk):
             self._on_market_tab_changed,
         )
 
-        self.latest_trade_var = tk.StringVar(value="")
-        self.latest_trade_label = ttk.Label(
-            outer,
-            textvariable=self.latest_trade_var,
-            anchor=tk.E,
-        )
-        self.latest_trade_label.pack(
+        self.market_footer = ttk.Frame(outer)
+        self.market_footer.pack(
             fill=tk.X,
             pady=(8, 0),
             after=self.table_frame,
         )
+        self.remaining_validity_var = tk.StringVar(value="")
+        self.remaining_validity_label = ttk.Label(
+            self.market_footer,
+            textvariable=self.remaining_validity_var,
+            anchor=tk.W,
+            takefocus=False,
+        )
+        self.remaining_validity_label.pack(side=tk.LEFT)
+
+        self.latest_trade_var = tk.StringVar(value="")
+        self.latest_trade_label = ttk.Label(
+            self.market_footer,
+            textvariable=self.latest_trade_var,
+            anchor=tk.E,
+        )
+        self.latest_trade_label.pack(side=tk.RIGHT)
 
         self.status_var = tk.StringVar(value="请输入股票名称或代码，并从候选项中选择。")
 
@@ -2907,6 +2968,24 @@ class StockPriceApp(tk.Tk):
             f"{amount:,.2f} {symbol.default_currency}"
         )
 
+    def _refresh_selected_warrant_validity(self) -> None:
+        page = self._active_page()
+        if page not in MARKET_ORDER:
+            self.remaining_validity_var.set("")
+            return
+        selected_items = [
+            item_id
+            for item_id in self.trees[page].selection()
+            if not self._is_market_spacer(item_id)
+        ]
+        if len(selected_items) != 1:
+            self.remaining_validity_var.set("")
+            return
+        maturity = self.put_warrant_maturity_months.get(selected_items[0])
+        self.remaining_validity_var.set(
+            "" if maturity is None else _format_remaining_validity(maturity)
+        )
+
     @staticmethod
     def _format_market_metrics(
         metrics: MarketMetrics,
@@ -2930,7 +3009,8 @@ class StockPriceApp(tk.Tk):
         if page not in MARKET_ORDER:
             self.market_summary_label.place_forget()
             self.latest_trade_var.set("")
-            self.latest_trade_label.pack_forget()
+            self.remaining_validity_var.set("")
+            self.market_footer.pack_forget()
             return
         market_value, profit, return_rate = self._format_market_metrics(
             metrics_by_market[page]
@@ -2943,8 +3023,9 @@ class StockPriceApp(tk.Tk):
         self.market_summary_label.place(x=260, y=22, anchor=tk.W)
         self.market_summary_label.lift()
         self.latest_trade_var.set(self._format_latest_market_trade(page))
-        if not self.latest_trade_label.winfo_manager():
-            self.latest_trade_label.pack(
+        self._refresh_selected_warrant_validity()
+        if not self.market_footer.winfo_manager():
+            self.market_footer.pack(
                 fill=tk.X,
                 pady=(8, 0),
                 after=self.table_frame,
@@ -4166,6 +4247,7 @@ class StockPriceApp(tk.Tk):
             tree.selection_remove(*spacer_ids)
             if self._is_market_spacer(tree.focus()):
                 tree.focus("")
+        self._refresh_selected_warrant_validity()
         self._schedule_market_cell_labels()
 
     @staticmethod
@@ -4324,6 +4406,7 @@ class StockPriceApp(tk.Tk):
             tree.selection_set(item_id)
         tree.focus(item_id)
         tree.focus_set()
+        self._refresh_selected_warrant_validity()
         self._column_resize_tree = None
         self._paired_market_resize_start = None
         self._swipe_start = (
@@ -4766,6 +4849,7 @@ class StockPriceApp(tk.Tk):
             self.symbols.pop(item_id, None)
             self.display_names.pop(item_id, None)
             self.current_prices.pop(item_id, None)
+            self.put_warrant_maturity_months.pop(item_id, None)
         self._schedule_market_cell_labels()
         self._update_market_spacers(market)
         self._refresh_statistics_dashboard()
@@ -5214,6 +5298,9 @@ class StockPriceApp(tk.Tk):
                 self.display_names[symbol.canonical] = chinese_name
         if not display_name:
             display_name = best.name or "--"
+        maturity = _put_warrant_maturity_month(quotes)
+        if maturity is not None:
+            self.put_warrant_maturity_months[symbol.canonical] = maturity
         percentage = (
             "--" if best.change_percent is None else f"{best.change_percent:+.2f}%"
         )
@@ -5246,6 +5333,7 @@ class StockPriceApp(tk.Tk):
             tags=(tag,) if tag else (),
         )
         self._schedule_market_cell_labels()
+        self._refresh_selected_warrant_validity()
         self._refresh_statistics_dashboard()
         trade_window = self._trade_windows.get(symbol.canonical)
         if trade_window is not None and trade_window.winfo_exists():
