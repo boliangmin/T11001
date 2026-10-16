@@ -67,10 +67,10 @@ TABLE_HEADINGS = {
     "price": "最新价格",
     "change": "涨跌幅",
     "holding": "持仓数",
-    "cost": "持仓成本",
+    "cost": "摊薄成本",
     "market_value": "总市值",
     "profit": "盈亏",
-    "return": "收益率",
+    "return": "累计收益率",
 }
 SORTABLE_MARKET_COLUMNS = {"market_value", "profit", "return"}
 DEFAULT_COLUMN_WIDTHS = {
