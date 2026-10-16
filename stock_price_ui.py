@@ -387,7 +387,7 @@ class CashFlowRecord:
     @classmethod
     def from_values(cls, flow_date: str, cny_amount: str) -> CashFlowRecord:
         if not all(isinstance(value, str) for value in (flow_date, cny_amount)):
-            raise ValueError("出金记录字段格式无效。")
+            raise ValueError("入金记录字段格式无效。")
         try:
             parsed_date = datetime.strptime(flow_date.strip(), "%Y-%m-%d").date()
         except ValueError as exc:
@@ -1717,7 +1717,7 @@ class CashFlowEntryDialog(tk.Toplevel):
         self.withdraw()
         _apply_window_icon(self)
         self.configure(background=APP_BACKGROUND)
-        self.title("修改出金" if initial_record is not None else "增加出金")
+        self.title("修改入金" if initial_record is not None else "增加入金")
         self.resizable(False, False)
         self.transient(owner)
         self._on_save = on_save
@@ -1758,7 +1758,7 @@ class CashFlowEntryDialog(tk.Toplevel):
 
     def _open_calendar(self, _event: tk.Event | None = None) -> str:
         popup = CalendarPopup(self, self.date_var.get(), self.date_var.set)
-        popup.title("选择出金日期")
+        popup.title("选择入金日期")
         return "break"
 
     def _record(self) -> CashFlowRecord:
@@ -1768,13 +1768,13 @@ class CashFlowEntryDialog(tk.Toplevel):
         try:
             record = self._record()
         except ValueError as exc:
-            messagebox.showerror("出金记录错误", str(exc), parent=self)
+            messagebox.showerror("入金记录错误", str(exc), parent=self)
             return
         if self._on_save(record):
             self.destroy()
         else:
             messagebox.showerror(
-                "保存失败", "出金记录未保存，请检查数据文件和目录权限。", parent=self
+                "保存失败", "入金记录未保存，请检查数据文件和目录权限。", parent=self
             )
 
 
@@ -1785,7 +1785,7 @@ class CashFlowWindow(tk.Toplevel):
         _apply_window_icon(self)
         self.configure(background=APP_BACKGROUND)
         self.owner = owner
-        self.title("出金记录")
+        self.title("入金记录")
         self.geometry("880x430")
         self.minsize(760, 340)
         self.transient(owner)
@@ -1797,7 +1797,7 @@ class CashFlowWindow(tk.Toplevel):
         self.summary_var = tk.StringVar()
         ttk.Label(header, textvariable=self.summary_var).pack(side=tk.LEFT)
         ttk.Button(
-            header, text="增加出金", command=self._add, style="Primary.TButton"
+            header, text="增加入金", command=self._add, style="Primary.TButton"
         ).pack(side=tk.RIGHT)
         table = ttk.Frame(outer)
         table.pack(fill=tk.BOTH, expand=True)
@@ -1821,14 +1821,14 @@ class CashFlowWindow(tk.Toplevel):
         self.tree.bind("<Double-1>", self._edit)
         ttk.Label(
             outer,
-            text="净出金 = 所有出金的人民币金额合计；右键记录可修改或删除。",
+            text="净入金 = 所有入金的人民币金额合计；右键记录可修改或删除。",
             style="Hint.TLabel",
         ).pack(anchor=tk.W, pady=(10, 0))
         self.reload()
         _center_and_show(self, owner, fit_content=False)
 
     def reload(self) -> None:
-        self.summary_var.set(f"净出金：{self.owner._net_cash_outflow():,.2f} CNY")
+        self.summary_var.set(f"净入金：{self.owner._net_cash_outflow():,.2f} CNY")
         for item in self.tree.get_children():
             self.tree.delete(item)
         for index, record in enumerate(self.owner.cash_flows):
@@ -1868,7 +1868,7 @@ class CashFlowWindow(tk.Toplevel):
     def _delete(self) -> None:
         index = self._selected_index()
         if index is not None and messagebox.askyesno(
-            "删除出金", "确定删除选中的出金记录？", parent=self
+            "删除入金", "确定删除选中的入金记录？", parent=self
         ):
             if not self.owner._delete_cash_flow(index):
                 messagebox.showerror("删除失败", "记录未删除，请检查数据目录权限。", parent=self)
@@ -2520,7 +2520,7 @@ class StockPriceApp(tk.Tk):
         )
         cash_card.columnconfigure(0, weight=1)
         cash_title = tk.Label(
-            cash_card, text="净出金", background=STATISTICS_CARD,
+            cash_card, text="净入金", background=STATISTICS_CARD,
             foreground=STATISTICS_TEXT, font=("Microsoft YaHei UI", 10, "bold"),
         )
         cash_title.grid(row=0, column=0, sticky="w", padx=18, pady=(9, 0))
@@ -2691,7 +2691,7 @@ class StockPriceApp(tk.Tk):
 
     def _open_cash_flow_window(self, _event: tk.Event | None = None) -> None:
         if self._cash_flow_load_error:
-            messagebox.showerror("出金数据错误", self._cash_flow_load_error, parent=self)
+            messagebox.showerror("入金数据错误", self._cash_flow_load_error, parent=self)
             return
         if self._cash_flow_window is not None and self._cash_flow_window.winfo_exists():
             self._cash_flow_window.deiconify()
@@ -2739,16 +2739,16 @@ class StockPriceApp(tk.Tk):
                 if not isinstance(item, dict):
                     raise ValueError("记录格式无效")
                 # Legacy records carried a type, currency and rate; only legacy
-                # outflows convert to the RMB-only format.
-                if item.get("flow_type", "出金") != "出金":
-                    raise ValueError("包含旧版入金记录")
+                # inflows convert to the RMB-only format.
+                if item.get("flow_type", "入金") != "入金":
+                    raise ValueError("包含旧版出金记录")
                 records.append(CashFlowRecord.from_values(
                     item.get("flow_date"), item.get("cny_amount")
                 ))
             self.cash_flows = records
         except ValueError:
             self._cash_flow_load_error = (
-                "出金数据格式异常或包含旧版入金记录，原始记录已保留，暂不允许修改。"
+                "入金数据格式异常或包含旧版出金记录，原始记录已保留，暂不允许修改。"
             )
             self._cash_flow_unparsed = raw
 
@@ -3715,7 +3715,7 @@ class StockPriceApp(tk.Tk):
         if not messagebox.askyesno(
             "同步到云端",
             "将把本机的完整状态同步到 Google Drive，并覆盖当前云端快照。\n\n"
-            "同步内容包括股票、交易记录、T 交易、出金、窗口位置、"
+            "同步内容包括股票、交易记录、T 交易、入金、窗口位置、"
             "列宽和当前页面。是否继续？",
             parent=self,
         ):
