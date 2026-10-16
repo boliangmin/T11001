@@ -706,7 +706,11 @@ class CalendarPopup(tk.Toplevel):
             self._year,
             self._month,
         )
+        # The popup keeps the size it opened with, so every month renders six
+        # equally tall week rows and the footer buttons never shift or clip.
+        weeks += [[0] * 7 for _ in range(6 - len(weeks))]
         for row, week in enumerate(weeks, start=1):
+            self.days_frame.rowconfigure(row, uniform="week")
             for column, day_number in enumerate(week):
                 if not day_number:
                     ttk.Label(self.days_frame, text="", width=4).grid(
