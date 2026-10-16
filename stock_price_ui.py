@@ -624,10 +624,6 @@ class CalendarPopup(tk.Toplevel):
             style="Primary.TButton",
             takefocus=False,
         ).pack(side=tk.RIGHT)
-        ttk.Button(footer, text="取消", command=self._close).pack(
-            side=tk.RIGHT,
-            padx=(0, 8),
-        )
         self.selected_label = ttk.Label(
             footer,
             anchor=tk.CENTER,
