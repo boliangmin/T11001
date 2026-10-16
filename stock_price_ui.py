@@ -72,6 +72,7 @@ TABLE_HEADINGS = {
     "profit": "盈亏",
     "return": "收益率",
 }
+SORTABLE_MARKET_COLUMNS = {"market_value", "profit", "return"}
 DEFAULT_COLUMN_WIDTHS = {
     "code": 95,
     "name": 135,
@@ -1919,6 +1920,7 @@ class StockPriceApp(tk.Tk):
         self.trade_window_size = TRADE_WINDOW_DEFAULT_SIZE
         self.trade_column_widths = DEFAULT_TRADE_COLUMN_WIDTHS.copy()
         self.show_closed_positions = {market: True for market in MARKET_ORDER}
+        self.market_sorts: dict[str, tuple[str, bool]] = {}
         self.current_prices: dict[str, tuple[Decimal, str]] = {}
         self.put_warrant_maturity_months: dict[str, tuple[int, int]] = {}
         self.exchange_rates: ExchangeRates | None = None
@@ -2313,11 +2315,21 @@ class StockPriceApp(tk.Tk):
             )
             self.trees[market] = tree
             for column in TABLE_COLUMNS:
-                tree.heading(
-                    column,
-                    text=TABLE_HEADINGS[column],
-                    anchor=tk.CENTER,
-                )
+                heading_options: dict[str, object] = {
+                    "text": TABLE_HEADINGS[column],
+                    "anchor": tk.CENTER,
+                }
+                if column in SORTABLE_MARKET_COLUMNS:
+                    heading_options["command"] = (
+                        lambda target_market=market, selected=column: (
+                            self._sort_market_rows(
+                                target_market,
+                                selected,
+                                descending=False,
+                            )
+                        )
+                    )
+                tree.heading(column, **heading_options)
                 tree.column(
                     column,
                     width=DEFAULT_COLUMN_WIDTHS[column],
@@ -4088,16 +4100,22 @@ class StockPriceApp(tk.Tk):
             return None
         row_id = tree.identify_row(event.y)
         region = tree.identify_region(event.x, event.y)
-        if (
-            (row_id and not self._is_market_spacer(row_id))
-            or region in {"heading", "separator"}
-        ):
-            return None
-
         market = next(
             (name for name, market_tree in self.trees.items() if market_tree is tree),
             None,
         )
+        if region == "heading":
+            column = self._market_column_at(tree, event.x)
+            if market is not None and column in SORTABLE_MARKET_COLUMNS:
+                self._sort_market_rows(market, column, descending=True)
+                return "break"
+            return None
+        if (
+            (row_id and not self._is_market_spacer(row_id))
+            or region == "separator"
+        ):
+            return None
+
         if market is None:
             return None
         selected_items = tree.selection()
@@ -4806,7 +4824,59 @@ class StockPriceApp(tk.Tk):
 
         self._reorder_market_rows(market)
 
+    @staticmethod
+    def _market_column_at(tree: ttk.Treeview, x: int) -> str | None:
+        column_id = tree.identify_column(x)
+        if not column_id.startswith("#"):
+            return None
+        try:
+            index = int(column_id[1:]) - 1
+        except ValueError:
+            return None
+        return TABLE_COLUMNS[index] if 0 <= index < len(TABLE_COLUMNS) else None
+
+    def _sort_market_rows(self, market: str, column: str, descending: bool) -> None:
+        tree = self.trees.get(market)
+        if tree is None or column not in SORTABLE_MARKET_COLUMNS:
+            return
+
+        sortable_items: list[tuple[str, Decimal]] = []
+        missing_items: list[str] = []
+        for item_id in tree.get_children(""):
+            if item_id not in self.symbols:
+                continue
+            match = re.match(
+                r"^\s*([+-]?\d[\d,]*(?:\.\d+)?)",
+                tree.set(item_id, column),
+            )
+            if match is None:
+                missing_items.append(item_id)
+                continue
+            sortable_items.append(
+                (item_id, Decimal(match.group(1).replace(",", "")))
+            )
+
+        sortable_items.sort(key=lambda item: item[1], reverse=descending)
+        ordered_items = [item_id for item_id, _value in sortable_items]
+        ordered_items.extend(missing_items)
+        for position, item_id in enumerate(ordered_items):
+            tree.move(item_id, "", position)
+
+        self.market_sorts[market] = (column, descending)
+        for heading_column in TABLE_COLUMNS:
+            heading = TABLE_HEADINGS[heading_column]
+            if heading_column == column:
+                heading += " ↓" if descending else " ↑"
+            tree.heading(heading_column, text=heading)
+        self._update_market_spacers(market)
+        self._schedule_market_cell_labels()
+
     def _reorder_market_rows(self, market: str) -> None:
+        market_sort = self.market_sorts.get(market)
+        if market_sort is not None:
+            self._sort_market_rows(market, *market_sort)
+            return
+
         tree = self.trees.get(market)
         if tree is None:
             return
@@ -5244,6 +5314,9 @@ class StockPriceApp(tk.Tk):
             ),
             tags=(tag,) if tag else (),
         )
+        market_sort = self.market_sorts.get(symbol.market)
+        if market_sort is not None:
+            self._sort_market_rows(symbol.market, *market_sort)
         self._schedule_market_cell_labels()
         self._refresh_selected_warrant_validity()
         self._refresh_statistics_dashboard()
