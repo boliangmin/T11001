@@ -835,27 +835,11 @@ class TradeEntryDialog(tk.Toplevel):
             style="Sell.TRadiobutton",
         ).pack(side=tk.LEFT)
 
-        ttk.Label(content, text=f"交易价格（{currency}）").grid(
+        ttk.Label(content, text="交易份额").grid(
             row=2,
             column=0,
             sticky=tk.W,
             pady=(0, 12),
-        )
-        self.price_var = tk.StringVar(
-            value=initial_record.price if initial_record is not None else ""
-        )
-        self.price_entry = ttk.Entry(
-            content,
-            textvariable=self.price_var,
-            width=28,
-        )
-        self.price_entry.grid(row=2, column=1, sticky=tk.EW, pady=(0, 12))
-
-        ttk.Label(content, text="交易份额").grid(
-            row=3,
-            column=0,
-            sticky=tk.W,
-            pady=(0, 16),
         )
         initial_quantity = ""
         if initial_record is not None and initial_record.quantity != "--":
@@ -871,7 +855,23 @@ class TradeEntryDialog(tk.Toplevel):
                 "%P",
             ),
         )
-        self.quantity_entry.grid(row=3, column=1, sticky=tk.EW, pady=(0, 16))
+        self.quantity_entry.grid(row=2, column=1, sticky=tk.EW, pady=(0, 12))
+
+        ttk.Label(content, text=f"交易价格（{currency}）").grid(
+            row=3,
+            column=0,
+            sticky=tk.W,
+            pady=(0, 16),
+        )
+        self.price_var = tk.StringVar(
+            value=initial_record.price if initial_record is not None else ""
+        )
+        self.price_entry = ttk.Entry(
+            content,
+            textvariable=self.price_var,
+            width=28,
+        )
+        self.price_entry.grid(row=3, column=1, sticky=tk.EW, pady=(0, 16))
 
         buttons = ttk.Frame(content)
         buttons.grid(row=4, column=0, columnspan=2, sticky=tk.E)
@@ -891,7 +891,7 @@ class TradeEntryDialog(tk.Toplevel):
         self.bind("<Escape>", lambda _event: self.destroy())
         _center_and_show(self, owner)
         self.grab_set()
-        self.price_entry.focus_set()
+        self.quantity_entry.focus_set()
 
     def _open_calendar(self, _event: tk.Event | None = None) -> str:
         CalendarPopup(self, self.date_var.get(), self.date_var.set)
@@ -914,20 +914,6 @@ class TradeEntryDialog(tk.Toplevel):
             )
             return
 
-        raw_price = self.price_var.get().strip().replace(",", "")
-        try:
-            price_value = Decimal(raw_price)
-        except InvalidOperation:
-            price_value = Decimal(0)
-        if not price_value.is_finite() or price_value <= 0:
-            messagebox.showerror(
-                "交易价格错误",
-                "请输入大于 0 的有效交易价格。",
-                parent=self,
-            )
-            self.price_entry.focus_set()
-            return
-
         raw_quantity = self.quantity_var.get().strip()
         if not (
             raw_quantity
@@ -941,6 +927,20 @@ class TradeEntryDialog(tk.Toplevel):
                 parent=self,
             )
             self.quantity_entry.focus_set()
+            return
+
+        raw_price = self.price_var.get().strip().replace(",", "")
+        try:
+            price_value = Decimal(raw_price)
+        except InvalidOperation:
+            price_value = Decimal(0)
+        if not price_value.is_finite() or price_value <= 0:
+            messagebox.showerror(
+                "交易价格错误",
+                "请输入大于 0 的有效交易价格。",
+                parent=self,
+            )
+            self.price_entry.focus_set()
             return
 
         normalized_price = format(price_value.normalize(), "f")
