@@ -40,6 +40,9 @@ state.json.*
 # Local improvement backlog may describe unfixed security issues; never committed.
 /待改进项目.md
 
+# Machine-local temporary agent rules (see AGENTS.md section 10); never committed.
+/AGENTS.local.md
+
 # Local trading-data exports must never be committed, in any directory.
 20????????????.json
 20????????????_*交易同步*.json
