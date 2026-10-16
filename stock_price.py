@@ -9,8 +9,10 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import re
+import ssl
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,6 +34,26 @@ USER_AGENT = (
 ECB_DAILY_RATES_URL = (
     "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
 )
+# 欧洲央行网站证书链的根证书 Sectigo Public Server Authentication Root E46
+# （SHA-256 C9:0F:26:F0:FB:1B:40:18:B2:22:27:51:9B:5C:A2:B5:3E:2C:A5:B3:BE:5C:F1:8E:FE:1B:EF:47:38:0C:53:83）。
+# Windows 只在需要时才下载较新的根证书，Python 读取的系统证书库可能缺少它，
+# 导致汇率请求证书校验失败；这里额外信任该根证书，证书校验本身保持开启。
+ECB_ROOT_CA_PEM = """\
+-----BEGIN CERTIFICATE-----
+MIICOjCCAcGgAwIBAgIQQvLM2htpN0RfFf51KBC49DAKBggqhkjOPQQDAzBfMQsw
+CQYDVQQGEwJHQjEYMBYGA1UEChMPU2VjdGlnbyBMaW1pdGVkMTYwNAYDVQQDEy1T
+ZWN0aWdvIFB1YmxpYyBTZXJ2ZXIgQXV0aGVudGljYXRpb24gUm9vdCBFNDYwHhcN
+MjEwMzIyMDAwMDAwWhcNNDYwMzIxMjM1OTU5WjBfMQswCQYDVQQGEwJHQjEYMBYG
+A1UEChMPU2VjdGlnbyBMaW1pdGVkMTYwNAYDVQQDEy1TZWN0aWdvIFB1YmxpYyBT
+ZXJ2ZXIgQXV0aGVudGljYXRpb24gUm9vdCBFNDYwdjAQBgcqhkjOPQIBBgUrgQQA
+IgNiAAR2+pmpbiDt+dd34wc7qNs9Xzjoq1WmVk/WSOrsfy2qw7LFeeyZYX8QeccC
+WvkEN/U0NSt3zn8gj1KjAIns1aeibVvjS5KToID1AZTc8GgHHs3u/iVStSBDHBv+
+6xnOQ6OjQjBAMB0GA1UdDgQWBBTRItpMWfFLXyY4qp3W7usNw/upYTAOBgNVHQ8B
+Af8EBAMCAYYwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAwNnADBkAjAn7qRa
+qCG76UeXlImldCBteU/IvZNeWBj7LRoAasm4PdCkT0RHlAFWovgzJQxC36oCMB3q
+4S6ILuH5px0CMk7yn2xVdOOurvulGu7t0vzCAxHrRVxgED1cf5kDW21USAGKcw==
+-----END CERTIFICATE-----
+"""
 
 
 def _configure_console_encoding() -> None:
@@ -216,16 +238,35 @@ def parse_ecb_exchange_rates(payload: bytes) -> ExchangeRates:
     )
 
 
-def fetch_exchange_rates(timeout: float = 12.0) -> ExchangeRates:
+@functools.lru_cache(maxsize=1)
+def _ecb_ssl_context() -> ssl.SSLContext:
+    """在系统证书库之外额外信任欧洲央行证书链的根证书。"""
+    context = ssl.create_default_context()
+    context.load_verify_locations(cadata=ECB_ROOT_CA_PEM)
+    return context
+
+
+def fetch_exchange_rates(timeout: float = 12.0, attempts: int = 2) -> ExchangeRates:
     """获取 ECB 每日参考汇率。该数据并非实时交易汇率。"""
     request = Request(
         ECB_DAILY_RATES_URL,
         headers={"User-Agent": f"{USER_AGENT} StockPriceViewer/1.0"},
     )
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            with urlopen(request, timeout=timeout, context=_ecb_ssl_context()) as response:
+                payload = response.read()
+            break
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(0.35 * (attempt + 1))
+    else:
+        raise RuntimeError(f"欧洲央行汇率获取失败：{last_error}") from last_error
     try:
-        with urlopen(request, timeout=timeout) as response:
-            return parse_ecb_exchange_rates(response.read())
-    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+        return parse_ecb_exchange_rates(payload)
+    except ValueError as exc:
         raise RuntimeError(f"欧洲央行汇率获取失败：{exc}") from exc
 
 
