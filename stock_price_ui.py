@@ -571,78 +571,102 @@ class CalendarPopup(tk.Toplevel):
 
         outer = ttk.Frame(self, padding=(16, 14, 16, 14))
         outer.pack(fill=tk.BOTH, expand=True)
-        controls = ttk.Frame(outer)
-        controls.pack(fill=tk.X, pady=(0, 12))
+        year_row = ttk.Frame(outer)
+        year_row.pack(fill=tk.X, pady=(0, 10))
         ttk.Button(
-            controls,
-            text="← 上个月",
+            year_row,
+            text="« 上一年",
             width=10,
-            command=self._previous_month,
+            command=lambda: self._change_year(-1),
             style="Action.TButton",
+            takefocus=False,
         ).pack(side=tk.LEFT)
-
-        selectors = ttk.Frame(controls)
-        selectors.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=12)
-        self.year_var = tk.StringVar(value=f"{self._year} 年")
-        self.year_selector = ttk.Combobox(
-            selectors,
-            values=tuple(f"{year} 年" for year in range(1900, 2101)),
-            textvariable=self.year_var,
-            width=8,
-            state="readonly",
-            justify=tk.CENTER,
-            style="Calendar.TCombobox",
-        )
-        self.year_selector.pack(side=tk.LEFT, expand=True)
-        self.month_var = tk.StringVar(value=f"{self._month} 月")
-        self.month_selector = ttk.Combobox(
-            selectors,
-            values=tuple(f"{month} 月" for month in range(1, 13)),
-            textvariable=self.month_var,
-            width=6,
-            state="readonly",
-            justify=tk.CENTER,
-            style="Calendar.TCombobox",
-        )
-        self.month_selector.pack(side=tk.LEFT, expand=True, padx=(10, 0))
         ttk.Button(
-            controls,
-            text="下个月 →",
+            year_row,
+            text="下一年 »",
             width=10,
-            command=self._next_month,
+            command=lambda: self._change_year(1),
             style="Action.TButton",
+            takefocus=False,
         ).pack(side=tk.RIGHT)
-        self.year_selector.bind(
-            "<<ComboboxSelected>>",
-            self._render_from_controls,
+        self.year_label = ttk.Label(
+            year_row,
+            anchor=tk.CENTER,
+            font=("Microsoft YaHei UI", 12, "bold"),
         )
-        self.month_selector.bind(
-            "<<ComboboxSelected>>",
-            self._render_from_controls,
-        )
+        self.year_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        months_row = ttk.Frame(outer)
+        months_row.pack(fill=tk.X, pady=(0, 12))
+        self._month_buttons: list[ttk.Button] = []
+        for index in range(12):
+            button = ttk.Button(
+                months_row,
+                text=f"{index + 1}月",
+                width=-4,
+                command=lambda month=index + 1: self._show_month(month),
+                style="CalendarMonth.TButton",
+                takefocus=False,
+            )
+            button.grid(row=0, column=index, padx=1, sticky="ew")
+            months_row.columnconfigure(index, weight=1, uniform="month")
+            self._month_buttons.append(button)
 
         self.days_frame = ttk.Frame(outer)
         self.days_frame.pack(fill=tk.BOTH, expand=True)
         footer = ttk.Frame(outer)
         footer.pack(fill=tk.X, pady=(10, 0))
         ttk.Button(footer, text="今天", command=self._select_today).pack(side=tk.LEFT)
-        ttk.Button(footer, text="取消", command=self._close).pack(side=tk.RIGHT)
+        ttk.Button(
+            footer,
+            text="确认",
+            command=self._confirm,
+            style="Primary.TButton",
+            takefocus=False,
+        ).pack(side=tk.RIGHT)
+        ttk.Button(footer, text="取消", command=self._close).pack(
+            side=tk.RIGHT,
+            padx=(0, 8),
+        )
+        self.selected_label = ttk.Label(
+            footer,
+            anchor=tk.CENTER,
+            style="Hint.TLabel",
+        )
+        self.selected_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        self._render_days()
+        self.bind("<Return>", lambda _event: self._confirm())
+        self.bind("<Escape>", lambda _event: self._close())
+        self.bind("<MouseWheel>", self._scroll_month)
+        self._render()
         _center_and_show(self, owner)
         self.grab_set()
 
-    def _render_from_controls(self, _event: tk.Event | None = None) -> None:
-        try:
-            year = int(self.year_var.get().removesuffix("年").strip())
-            month = int(self.month_var.get().removesuffix("月").strip())
-        except (tk.TclError, ValueError):
-            return
-        if not 1900 <= year <= 2100 or not 1 <= month <= 12:
+    def _render(self) -> None:
+        self.year_label.configure(text=f"{self._year} 年")
+        for month, button in enumerate(self._month_buttons, start=1):
+            button.configure(
+                style=(
+                    "SelectedCalendarMonth.TButton"
+                    if month == self._month
+                    else "CalendarMonth.TButton"
+                )
+            )
+        self.selected_label.configure(
+            text=f"已选：{self._selected_date.isoformat()}"
+        )
+        self._render_days()
+
+    def _change_year(self, offset: int) -> None:
+        year = self._year + offset
+        if not 1900 <= year <= 2100:
             return
         self._year = year
+        self._render()
+
+    def _show_month(self, month: int) -> None:
         self._month = month
-        self._render_days()
+        self._render()
 
     def _change_month(self, offset: int) -> None:
         month_index = self._year * 12 + self._month - 1 + offset
@@ -651,15 +675,12 @@ class CalendarPopup(tk.Toplevel):
             return
         self._year = year
         self._month = zero_based_month + 1
-        self.year_var.set(f"{self._year} 年")
-        self.month_var.set(f"{self._month} 月")
-        self._render_days()
+        self._render()
 
-    def _previous_month(self) -> None:
-        self._change_month(-1)
-
-    def _next_month(self) -> None:
-        self._change_month(1)
+    def _scroll_month(self, event: tk.Event) -> str:
+        if event.delta:
+            self._change_month(-1 if event.delta > 0 else 1)
+        return "break"
 
     def _render_days(self) -> None:
         for widget in self.days_frame.winfo_children():
@@ -709,12 +730,18 @@ class CalendarPopup(tk.Toplevel):
                 ).grid(row=row, column=column, padx=2, pady=2)
 
     def _select_day(self, day_number: int) -> None:
-        chosen = date(self._year, self._month, day_number)
-        self._on_select(chosen.isoformat())
-        self._close()
+        self._selected_date = date(self._year, self._month, day_number)
+        self._render()
 
     def _select_today(self) -> None:
-        self._on_select(date.today().isoformat())
+        today = date.today()
+        self._selected_date = today
+        self._year = today.year
+        self._month = today.month
+        self._render()
+
+    def _confirm(self) -> None:
+        self._on_select(self._selected_date.isoformat())
         self._close()
 
     def _close(self) -> None:
@@ -2042,25 +2069,6 @@ class StockPriceApp(tk.Tk):
             padding=4,
         )
         style.configure(
-            "Calendar.TCombobox",
-            fieldbackground=SURFACE,
-            background=SURFACE,
-            foreground=TEXT_PRIMARY,
-            arrowcolor=ACCENT,
-            bordercolor=DIVIDER,
-            lightcolor=DIVIDER,
-            darkcolor=DIVIDER,
-            padding=5,
-        )
-        style.map(
-            "Calendar.TCombobox",
-            fieldbackground=[("readonly", SURFACE)],
-            foreground=[("readonly", TEXT_PRIMARY)],
-            bordercolor=[("focus", ACCENT)],
-            lightcolor=[("focus", ACCENT)],
-            darkcolor=[("focus", ACCENT)],
-        )
-        style.configure(
             "TButton",
             background=SURFACE_MUTED,
             foreground=TEXT_PRIMARY,
@@ -2225,6 +2233,22 @@ class StockPriceApp(tk.Tk):
         )
         style.map(
             "SelectedDay.TButton",
+            background=[("active", ACCENT_HOVER), ("pressed", "#1E40AF")],
+            foreground=[("active", TEXT_PRIMARY)],
+        )
+        style.configure("CalendarMonth.TButton", padding=(2, 5))
+        style.configure(
+            "SelectedCalendarMonth.TButton",
+            background=ACCENT,
+            foreground=TEXT_PRIMARY,
+            bordercolor=ACCENT,
+            lightcolor=ACCENT,
+            darkcolor=ACCENT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padding=(2, 5),
+        )
+        style.map(
+            "SelectedCalendarMonth.TButton",
             background=[("active", ACCENT_HOVER), ("pressed", "#1E40AF")],
             foreground=[("active", TEXT_PRIMARY)],
         )
