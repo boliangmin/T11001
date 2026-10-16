@@ -20,7 +20,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from tkinter import messagebox, ttk
 from tkinter import font as tkfont
@@ -379,65 +379,29 @@ class TradeRecord:
     trade_type: str
 
 
-CASH_FLOW_CURRENCIES = {"港币": "HKD", "美元": "USD"}
-
-
 @dataclass(frozen=True)
 class CashFlowRecord:
     flow_date: str
-    flow_type: str
-    currency: str
-    exchange_rate: str
     cny_amount: str
 
     @classmethod
-    def from_values(
-        cls,
-        flow_date: str,
-        flow_type: str,
-        currency: str,
-        exchange_rate: str,
-        cny_amount: str,
-    ) -> CashFlowRecord:
-        if not all(isinstance(value, str) for value in (
-            flow_date, flow_type, currency, exchange_rate, cny_amount
-        )):
-            raise ValueError("出入金记录字段格式无效。")
+    def from_values(cls, flow_date: str, cny_amount: str) -> CashFlowRecord:
+        if not all(isinstance(value, str) for value in (flow_date, cny_amount)):
+            raise ValueError("出金记录字段格式无效。")
         try:
             parsed_date = datetime.strptime(flow_date.strip(), "%Y-%m-%d").date()
         except ValueError as exc:
             raise ValueError("请通过日历选择有效的日期。") from exc
-        if flow_type not in {"入金", "出金"}:
-            raise ValueError("请选择入金或出金。")
-        if currency not in CASH_FLOW_CURRENCIES.values():
-            raise ValueError("请选择港币或美元。")
-        normalized = []
-        for raw, label, places in (
-            (exchange_rate, "汇率", 8), (cny_amount, "人民币金额", 2)
-        ):
-            text = raw.strip().replace(",", "")
-            if not re.fullmatch(rf"[0-9]{{1,15}}(?:\.[0-9]{{1,{places}}})?", text):
-                raise ValueError(f"{label}须为正数，最多15位整数、{places}位小数。")
-            value = Decimal(text)
-            if value <= 0:
-                raise ValueError(f"{label}必须大于0。")
-            normalized.append(format(value, "f"))
-        return cls(parsed_date.isoformat(), flow_type, currency, *normalized)
-
-    @property
-    def foreign_amount(self) -> Decimal:
-        return (Decimal(self.cny_amount) / Decimal(self.exchange_rate)).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
+        text = cny_amount.strip().replace(",", "")
+        if not re.fullmatch(r"[0-9]{1,15}(?:\.[0-9]{1,2})?", text):
+            raise ValueError("人民币金额须为正数，最多15位整数、2位小数。")
+        value = Decimal(text)
+        if value <= 0:
+            raise ValueError("人民币金额必须大于0。")
+        return cls(parsed_date.isoformat(), format(value, "f"))
 
     def to_payload(self) -> dict[str, str]:
-        return {
-            "flow_date": self.flow_date,
-            "flow_type": self.flow_type,
-            "currency": self.currency,
-            "exchange_rate": self.exchange_rate,
-            "cny_amount": self.cny_amount,
-        }
+        return {"flow_date": self.flow_date, "cny_amount": self.cny_amount}
 
 
 @dataclass(frozen=True)
@@ -1753,33 +1717,21 @@ class CashFlowEntryDialog(tk.Toplevel):
         self.withdraw()
         _apply_window_icon(self)
         self.configure(background=APP_BACKGROUND)
-        self.title("修改出入金" if initial_record is not None else "增加出入金")
+        self.title("修改出金" if initial_record is not None else "增加出金")
         self.resizable(False, False)
         self.transient(owner)
         self._on_save = on_save
         self.date_var = tk.StringVar(value=(
             initial_record.flow_date if initial_record else date.today().isoformat()
         ))
-        self.type_var = tk.StringVar(value=(
-            initial_record.flow_type if initial_record else "入金"
-        ))
-        self.currency_var = tk.StringVar(value=(
-            next(name for name, code in CASH_FLOW_CURRENCIES.items()
-                 if code == initial_record.currency) if initial_record else "港币"
-        ))
-        self.rate_var = tk.StringVar(value=(
-            initial_record.exchange_rate if initial_record else ""
-        ))
         self.amount_var = tk.StringVar(value=(
             initial_record.cny_amount if initial_record else ""
         ))
-        self.rate_hint_var = tk.StringVar()
-        self.foreign_var = tk.StringVar(value="--")
 
         content = ttk.Frame(self, padding=(22, 18))
         content.pack(fill=tk.BOTH, expand=True)
         content.columnconfigure(1, weight=1)
-        for row, label in enumerate(("日期", "类型", "货币", "汇率", "人民币金额")):
+        for row, label in enumerate(("日期", "人民币金额")):
             ttk.Label(content, text=label).grid(
                 row=row, column=0, sticky=tk.W, padx=(0, 18), pady=(0, 12)
             )
@@ -1788,80 +1740,41 @@ class CashFlowEntryDialog(tk.Toplevel):
         )
         self.date_entry.grid(row=0, column=1, sticky=tk.EW, pady=(0, 12))
         self.date_entry.bind("<Button-1>", self._open_calendar)
-        type_controls = ttk.Frame(content)
-        type_controls.grid(row=1, column=1, sticky=tk.W, pady=(0, 12))
-        for name in ("入金", "出金"):
-            ttk.Radiobutton(
-                type_controls, text=name, value=name, variable=self.type_var
-            ).pack(side=tk.LEFT, padx=(0, 18))
-        ttk.Combobox(
-            content, textvariable=self.currency_var,
-            values=tuple(CASH_FLOW_CURRENCIES), state="readonly", width=28,
-        ).grid(row=2, column=1, sticky=tk.EW, pady=(0, 12))
-        rate_controls = ttk.Frame(content)
-        rate_controls.grid(row=3, column=1, sticky=tk.EW, pady=(0, 12))
-        self.rate_entry = ttk.Entry(rate_controls, textvariable=self.rate_var)
-        self.rate_entry.pack(fill=tk.X)
-        ttk.Label(rate_controls, textvariable=self.rate_hint_var).pack(anchor=tk.W)
-        ttk.Entry(content, textvariable=self.amount_var).grid(
-            row=4, column=1, sticky=tk.EW, pady=(0, 12)
-        )
-        ttk.Label(content, text="折合外币金额").grid(
-            row=5, column=0, sticky=tk.W, padx=(0, 18), pady=(0, 16)
-        )
-        ttk.Label(content, textvariable=self.foreign_var).grid(
-            row=5, column=1, sticky=tk.W, pady=(0, 16)
-        )
+        self.amount_entry = ttk.Entry(content, textvariable=self.amount_var, width=28)
+        self.amount_entry.grid(row=1, column=1, sticky=tk.EW, pady=(0, 16))
         buttons = ttk.Frame(content)
-        buttons.grid(row=6, column=0, columnspan=2, sticky=tk.E)
+        buttons.grid(row=2, column=0, columnspan=2, sticky=tk.E)
         ttk.Button(buttons, text="取消", command=self.destroy).pack(
             side=tk.LEFT, padx=(0, 8)
         )
         ttk.Button(
             buttons, text="保存", command=self._submit, style="Primary.TButton"
         ).pack(side=tk.LEFT)
-        for variable in (self.currency_var, self.rate_var, self.amount_var):
-            variable.trace_add("write", self._refresh_preview)
-        self._refresh_preview()
         self.bind("<Return>", lambda _event: self._submit())
         self.bind("<Escape>", lambda _event: self.destroy())
         _center_and_show(self, owner)
         self.grab_set()
-        self.rate_entry.focus_set()
+        self.amount_entry.focus_set()
 
     def _open_calendar(self, _event: tk.Event | None = None) -> str:
         popup = CalendarPopup(self, self.date_var.get(), self.date_var.set)
-        popup.title("选择出入金日期")
+        popup.title("选择出金日期")
         return "break"
 
     def _record(self) -> CashFlowRecord:
-        return CashFlowRecord.from_values(
-            self.date_var.get(), self.type_var.get(),
-            CASH_FLOW_CURRENCIES.get(self.currency_var.get(), ""),
-            self.rate_var.get(), self.amount_var.get(),
-        )
-
-    def _refresh_preview(self, *_args: str) -> None:
-        currency = CASH_FLOW_CURRENCIES.get(self.currency_var.get(), "--")
-        self.rate_hint_var.set(f"1 {currency} = 所填汇率 CNY")
-        try:
-            record = self._record()
-        except ValueError:
-            self.foreign_var.set("--")
-            return
-        self.foreign_var.set(f"{record.foreign_amount:,.2f} {record.currency}")
+        return CashFlowRecord.from_values(self.date_var.get(), self.amount_var.get())
 
     def _submit(self) -> None:
         try:
             record = self._record()
         except ValueError as exc:
-            messagebox.showerror("出入金记录错误", str(exc), parent=self)
+            messagebox.showerror("出金记录错误", str(exc), parent=self)
             return
         if self._on_save(record):
             self.destroy()
         else:
             messagebox.showerror(
-                "保存失败", "出入金记录未保存，请检查数据文件和目录权限。", parent=self
+                "保存失败", "出金记录未保存，请检查数据文件和目录权限。", parent=self
             )
 
 
@@ -1872,7 +1785,7 @@ class CashFlowWindow(tk.Toplevel):
         _apply_window_icon(self)
         self.configure(background=APP_BACKGROUND)
         self.owner = owner
-        self.title("出入金记录")
+        self.title("出金记录")
         self.geometry("880x430")
         self.minsize(760, 340)
         self.transient(owner)
@@ -1884,19 +1797,17 @@ class CashFlowWindow(tk.Toplevel):
         self.summary_var = tk.StringVar()
         ttk.Label(header, textvariable=self.summary_var).pack(side=tk.LEFT)
         ttk.Button(
-            header, text="增加出入金", command=self._add, style="Primary.TButton"
+            header, text="增加出金", command=self._add, style="Primary.TButton"
         ).pack(side=tk.RIGHT)
         table = ttk.Frame(outer)
         table.pack(fill=tk.BOTH, expand=True)
-        columns = ("date", "type", "currency", "rate", "cny", "foreign")
+        columns = ("date", "cny")
         self.tree = ttk.Treeview(
             table, columns=columns, show="headings", selectmode="browse"
         )
-        for column, title, width in zip(columns, (
-            "日期", "类型", "货币", "汇率（CNY/外币）", "人民币金额", "外币金额"
-        ), (110, 70, 85, 160, 160, 160)):
+        for column, title in zip(columns, ("日期", "人民币金额")):
             self.tree.heading(column, text=title, anchor=tk.CENTER)
-            self.tree.column(column, width=width, minwidth=60, anchor=tk.CENTER)
+            self.tree.column(column, width=400, minwidth=60, anchor=tk.CENTER)
         scrollbar = ttk.Scrollbar(table, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
@@ -1910,7 +1821,7 @@ class CashFlowWindow(tk.Toplevel):
         self.tree.bind("<Double-1>", self._edit)
         ttk.Label(
             outer,
-            text="净出金 = 累计出金 − 累计入金（人民币）；右键记录可修改或删除。",
+            text="净出金 = 所有出金的人民币金额合计；右键记录可修改或删除。",
             style="Hint.TLabel",
         ).pack(anchor=tk.W, pady=(10, 0))
         self.reload()
@@ -1922,10 +1833,7 @@ class CashFlowWindow(tk.Toplevel):
             self.tree.delete(item)
         for index, record in enumerate(self.owner.cash_flows):
             self.tree.insert("", tk.END, iid=str(index), values=(
-                record.flow_date, record.flow_type,
-                "港币" if record.currency == "HKD" else "美元",
-                record.exchange_rate, f"{Decimal(record.cny_amount):,.2f}",
-                f"{record.foreign_amount:,.2f} {record.currency}",
+                record.flow_date, f"{Decimal(record.cny_amount):,.2f}",
             ))
 
     def _selected_index(self) -> int | None:
@@ -1960,7 +1868,7 @@ class CashFlowWindow(tk.Toplevel):
     def _delete(self) -> None:
         index = self._selected_index()
         if index is not None and messagebox.askyesno(
-            "删除出入金", "确定删除选中的出入金记录？", parent=self
+            "删除出金", "确定删除选中的出金记录？", parent=self
         ):
             if not self.owner._delete_cash_flow(index):
                 messagebox.showerror("删除失败", "记录未删除，请检查数据目录权限。", parent=self)
@@ -2753,10 +2661,9 @@ class StockPriceApp(tk.Tk):
             )
 
     def _net_cash_outflow(self) -> Decimal:
-        return sum((
-            Decimal(record.cny_amount) * (1 if record.flow_type == "出金" else -1)
-            for record in self.cash_flows
-        ), Decimal("0"))
+        return sum(
+            (Decimal(record.cny_amount) for record in self.cash_flows), Decimal("0")
+        )
 
     def _refresh_statistics_amount_visibility(self) -> None:
         if self._statistics_amounts_visible:
@@ -2784,7 +2691,7 @@ class StockPriceApp(tk.Tk):
 
     def _open_cash_flow_window(self, _event: tk.Event | None = None) -> None:
         if self._cash_flow_load_error:
-            messagebox.showerror("出入金数据错误", self._cash_flow_load_error, parent=self)
+            messagebox.showerror("出金数据错误", self._cash_flow_load_error, parent=self)
             return
         if self._cash_flow_window is not None and self._cash_flow_window.winfo_exists():
             self._cash_flow_window.deiconify()
@@ -2831,13 +2738,18 @@ class StockPriceApp(tk.Tk):
             for item in raw:
                 if not isinstance(item, dict):
                     raise ValueError("记录格式无效")
+                # Legacy records carried a type, currency and rate; only legacy
+                # outflows convert to the RMB-only format.
+                if item.get("flow_type", "出金") != "出金":
+                    raise ValueError("包含旧版入金记录")
                 records.append(CashFlowRecord.from_values(
-                    item.get("flow_date"), item.get("flow_type"), item.get("currency"),
-                    item.get("exchange_rate"), item.get("cny_amount"),
+                    item.get("flow_date"), item.get("cny_amount")
                 ))
             self.cash_flows = records
         except ValueError:
-            self._cash_flow_load_error = "出入金数据格式异常，原始记录已保留，暂不允许修改。"
+            self._cash_flow_load_error = (
+                "出金数据格式异常或包含旧版入金记录，原始记录已保留，暂不允许修改。"
+            )
             self._cash_flow_unparsed = raw
 
     def _restore_geometry(self, geometry: object) -> bool:
@@ -3803,7 +3715,7 @@ class StockPriceApp(tk.Tk):
         if not messagebox.askyesno(
             "同步到云端",
             "将把本机的完整状态同步到 Google Drive，并覆盖当前云端快照。\n\n"
-            "同步内容包括股票、交易记录、T 交易、出入金、窗口位置、"
+            "同步内容包括股票、交易记录、T 交易、出金、窗口位置、"
             "列宽和当前页面。是否继续？",
             parent=self,
         ):
