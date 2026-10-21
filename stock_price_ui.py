@@ -14,6 +14,7 @@ import re
 import shutil
 import sys
 import threading
+import time
 import tkinter as tk
 import uuid
 from collections.abc import Callable
@@ -144,7 +145,9 @@ TRADE_WINDOW_MIN_SIZE = (720, 340)
 SORTABLE_TRADE_COLUMNS = {"trade_date", "profit", "return"}
 T_TRADE_ITEM_PREFIX = "t-trade-"
 STATE_VERSION = 4
-AUTO_REFRESH_INTERVAL_MS = 5 * 60 * 1000
+AUTO_REFRESH_INTERVAL_MS = 90 * 1000
+SURGE_ALERT_WINDOW_SECONDS = 4 * 60
+SURGE_ALERT_THRESHOLD = Decimal("0.10")
 APP_ICON_FILENAME = "trade_view.ico"
 WINDOWS_APP_USER_MODEL_ID = "Blmcc.TradeView.1.0"
 PASSWORD_HASH_ITERATIONS = 310_000
@@ -1906,6 +1909,85 @@ class CashFlowWindow(tk.Toplevel):
         self.destroy()
 
 
+@dataclass(frozen=True)
+class SurgeAlert:
+    code: str
+    name: str
+    base_price: Decimal
+    current_price: Decimal
+    currency: str
+    elapsed_seconds: float
+
+
+class SurgeAlertWindow(tk.Toplevel):
+    def __init__(self, owner: tk.Tk, alerts: list[SurgeAlert]) -> None:
+        super().__init__(owner)
+        _apply_window_icon(self)
+        self.withdraw()
+        self.configure(background=APP_BACKGROUND)
+        self.title("股价急涨提醒")
+        self.resizable(False, False)
+        # Not transient, so the alert stays visible while the main window is minimized.
+        self.attributes("-topmost", True)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        outer = ttk.Frame(self, padding=(20, 16, 20, 16))
+        outer.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            outer,
+            text=(
+                f"以下股票 {SURGE_ALERT_WINDOW_SECONDS // 60} 分钟内涨幅超过 "
+                f"{SURGE_ALERT_THRESHOLD:.0%}"
+            ),
+            font=("Microsoft YaHei UI", 12, "bold"),
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            outer,
+            text=f"提醒时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            style="Hint.TLabel",
+        ).pack(anchor=tk.W, pady=(2, 10))
+
+        rows = ttk.Frame(outer)
+        rows.pack(fill=tk.X)
+        for row, alert in enumerate(alerts):
+            rise = (alert.current_price - alert.base_price) / alert.base_price
+            elapsed = int(alert.elapsed_seconds)
+            values = (
+                alert.code,
+                alert.name,
+                f"{alert.base_price:,.3f} → {alert.current_price:,.3f} {alert.currency}",
+                f"{rise:+.2%}",
+                f"{elapsed // 60}分{elapsed % 60:02d}秒内",
+            )
+            for column, text in enumerate(values):
+                ttk.Label(
+                    rows,
+                    text=text,
+                    foreground=BUY_COLOR if column == 3 else TEXT_PRIMARY,
+                ).grid(
+                    row=row,
+                    column=column,
+                    padx=(0 if column == 0 else 14, 0),
+                    pady=2,
+                    sticky="w",
+                )
+
+        ttk.Label(
+            outer,
+            text="行情来自公开接口，可能延迟或出错，仅作参考，请以券商行情为准。",
+            style="Hint.TLabel",
+        ).pack(anchor=tk.W, pady=(10, 0))
+        ttk.Button(
+            outer,
+            text="知道了",
+            command=self.destroy,
+            style="Primary.TButton",
+            takefocus=False,
+        ).pack(anchor=tk.E, pady=(12, 0))
+        _center_and_show(self)
+        self.bell()
+
+
 class StockPriceApp(tk.Tk):
     def __init__(self, state_path: Path | None = None) -> None:
         super().__init__()
@@ -1949,6 +2031,8 @@ class StockPriceApp(tk.Tk):
         self.show_closed_positions = {market: True for market in MARKET_ORDER}
         self.market_sorts: dict[str, tuple[str, bool]] = {}
         self.current_prices: dict[str, tuple[Decimal, str]] = {}
+        self._price_history: dict[str, list[tuple[float, Decimal]]] = {}
+        self._pending_surge_alerts: list[SurgeAlert] = []
         self.put_warrant_maturity_months: dict[str, tuple[int, int]] = {}
         self.exchange_rates: ExchangeRates | None = None
         self.exchange_rate_warning = ""
@@ -4803,6 +4887,7 @@ class StockPriceApp(tk.Tk):
             self.symbols.pop(item_id, None)
             self.display_names.pop(item_id, None)
             self.current_prices.pop(item_id, None)
+            self._price_history.pop(item_id, None)
             self.put_warrant_maturity_months.pop(item_id, None)
         self._schedule_market_cell_labels()
         self._update_market_spacers(market)
@@ -5311,10 +5396,24 @@ class StockPriceApp(tk.Tk):
             "--" if best.change_percent is None else f"{best.change_percent:+.2f}%"
         )
         price = f"{best.price:,.3f} {best.currency}"
+        current_price = Decimal(str(best.price))
         self.current_prices[symbol.canonical] = (
-            Decimal(str(best.price)),
+            current_price,
             best.currency,
         )
+        surge = self._check_price_surge(symbol.canonical, current_price)
+        if surge is not None:
+            base_price, elapsed_seconds = surge
+            self._pending_surge_alerts.append(
+                SurgeAlert(
+                    symbol.canonical,
+                    display_name,
+                    base_price,
+                    current_price,
+                    best.currency,
+                    elapsed_seconds,
+                )
+            )
         holding_count, holding_cost, market_value, profit, return_rate = (
             self._calculate_position_metrics(symbol)
         )
@@ -5349,6 +5448,29 @@ class StockPriceApp(tk.Tk):
             trade_window.refresh_summary()
         self._save_state()
 
+    def _check_price_surge(
+        self,
+        code: str,
+        price: Decimal,
+    ) -> tuple[Decimal, float] | None:
+        if price <= 0:
+            return None
+        now = time.monotonic()
+        history = [
+            sample
+            for sample in self._price_history.get(code, [])
+            if now - sample[0] <= SURGE_ALERT_WINDOW_SECONDS
+        ]
+        if history:
+            base_time, base_price = min(history, key=lambda sample: sample[1])
+            if price > base_price * (1 + SURGE_ALERT_THRESHOLD):
+                # Start over from the alerted price so one surge only alerts once.
+                self._price_history[code] = [(now, price)]
+                return base_price, now - base_time
+        history.append((now, price))
+        self._price_history[code] = history
+        return None
+
     def _show_row_error(self, symbol: StockSymbol, error: str) -> None:
         tree = self._tree_for_symbol(symbol)
         if not tree.exists(symbol.canonical):
@@ -5376,6 +5498,10 @@ class StockPriceApp(tk.Tk):
         self.code_entry.focus_set()
         if self._selected_result is not None:
             self.add_stock()
+        if self._pending_surge_alerts:
+            alerts = self._pending_surge_alerts
+            self._pending_surge_alerts = []
+            SurgeAlertWindow(self, alerts)
 
 
 def main() -> None:
