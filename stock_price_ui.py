@@ -104,8 +104,6 @@ ACCENT_SOFT = "#DBEAFE"
 TAB_SELECTED_BACKGROUND = "#8DB600"
 BUY_COLOR = "#DC2626"
 SELL_COLOR = "#059669"
-HIGH_RETURN_BACKGROUND = "#FEF3C7"
-HIGH_RETURN_THRESHOLD = Decimal("0.20")
 DIVIDER = "#D7E0EC"
 STATISTICS_BACKGROUND = "#F7F4EE"
 STATISTICS_CNY_CARD = "#F3E6D2"
@@ -1050,10 +1048,6 @@ class StockTradeWindow(tk.Toplevel):
                 anchor=tk.CENTER,
                 stretch=column == "remark",
             )
-        self.trade_tree.tag_configure(
-            "high_return",
-            background=HIGH_RETURN_BACKGROUND,
-        )
         scrollbar = ttk.Scrollbar(
             table_frame,
             orient=tk.VERTICAL,
@@ -1193,26 +1187,25 @@ class StockTradeWindow(tk.Toplevel):
 
     def _reload_records(self) -> None:
         self.trade_tree.delete(*self.trade_tree.get_children(""))
-        groups_by_first_index: dict[int, tuple[TTradeGroup, tuple, tuple[str, ...]]] = {}
+        groups_by_first_index: dict[int, tuple[TTradeGroup, tuple[str, ...]]] = {}
         grouped_indices: set[int] = set()
         for group in self.owner.t_trade_groups.get(self.symbol.canonical, []):
             row = self._t_trade_row(group)
             if row is None:
                 continue
-            groups_by_first_index[group.record_indices[0]] = (group, row[0], row[1])
+            groups_by_first_index[group.record_indices[0]] = (group, row)
             grouped_indices.update(group.record_indices)
 
         records = self.owner.trades.get(self.symbol.canonical, [])
         for index, record in enumerate(records):
             group_row = groups_by_first_index.get(index)
             if group_row is not None:
-                group, values, tags = group_row
+                group, values = group_row
                 self.trade_tree.insert(
                     "",
                     tk.END,
                     iid=f"{T_TRADE_ITEM_PREFIX}{group.group_id}",
                     values=values,
-                    tags=tags,
                 )
                 continue
             if index in grouped_indices:
@@ -1235,14 +1228,13 @@ class StockTradeWindow(tk.Toplevel):
                     return_rate,
                     self.owner._sell_cost_remark(self.symbol, record, index),
                 ),
-                tags=self._trade_row_tags(record, index),
             )
         self.refresh_summary()
 
     def _t_trade_row(
         self,
         group: TTradeGroup,
-    ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    ) -> tuple[str, ...] | None:
         summary = self.owner._calculate_t_trade_summary(self.symbol, group)
         if summary is None:
             return None
@@ -1254,7 +1246,6 @@ class StockTradeWindow(tk.Toplevel):
             quantity = "0"
             profit = "--"
             return_rate = "--"
-            tags: tuple[str, ...] = ()
             cost_remark = ""
         else:
             trade_type = residual.trade_type
@@ -1271,7 +1262,6 @@ class StockTradeWindow(tk.Toplevel):
                 residual,
                 anchor_index,
             )
-            tags = self._trade_row_tags(residual, anchor_index)
             cost_remark = self.owner._sell_cost_remark(
                 self.symbol,
                 residual,
@@ -1285,16 +1275,13 @@ class StockTradeWindow(tk.Toplevel):
         if cost_remark:
             remark += f"｜{cost_remark}"
         return (
-            (
-                summary.trade_date,
-                trade_type,
-                price,
-                quantity,
-                profit,
-                return_rate,
-                remark,
-            ),
-            tags,
+            summary.trade_date,
+            trade_type,
+            price,
+            quantity,
+            profit,
+            return_rate,
+            remark,
         )
 
     def refresh_summary(self) -> None:
@@ -1320,35 +1307,17 @@ class StockTradeWindow(tk.Toplevel):
                 index,
             )
             values[6] = self.owner._sell_cost_remark(self.symbol, record, index)
-            self.trade_tree.item(
-                item_id,
-                values=values,
-                tags=self._trade_row_tags(record, index),
-            )
+            self.trade_tree.item(item_id, values=values)
         for group in self.owner.t_trade_groups.get(self.symbol.canonical, []):
             item_id = f"{T_TRADE_ITEM_PREFIX}{group.group_id}"
             if not self.trade_tree.exists(item_id):
                 continue
             row = self._t_trade_row(group)
             if row is not None:
-                self.trade_tree.item(item_id, values=row[0], tags=row[1])
+                self.trade_tree.item(item_id, values=row)
         if self._sort_column is not None:
             self._sort_records(self._sort_column, self._sort_descending)
         self._schedule_trade_cell_labels()
-
-    def _trade_row_tags(
-        self,
-        record: TradeRecord,
-        anchor_index: int,
-    ) -> tuple[str, ...]:
-        tags: list[str] = []
-        if self.owner._trade_return_exceeds_threshold(
-            self.symbol,
-            record,
-            anchor_index,
-        ):
-            tags.append("high_return")
-        return tuple(tags)
 
     def _sort_records(self, column: str, descending: bool) -> None:
         if column not in SORTABLE_TRADE_COLUMNS:
@@ -1464,14 +1433,7 @@ class StockTradeWindow(tk.Toplevel):
         selected_items = set(self.trade_tree.selection())
         target_columns = ("profit", "return")
         for item_id in self.trade_tree.get_children(""):
-            item_tags = set(self.trade_tree.item(item_id, "tags"))
-            background = (
-                ACCENT_SOFT
-                if item_id in selected_items
-                else HIGH_RETURN_BACKGROUND
-                if "high_return" in item_tags
-                else SURFACE
-            )
+            background = ACCENT_SOFT if item_id in selected_items else SURFACE
             for column in target_columns:
                 bounds = self.trade_tree.bbox(item_id, column)
                 if not bounds:
@@ -5294,19 +5256,6 @@ class StockPriceApp(tk.Tk):
                     held_quantity = Decimal("0")
                     held_cost = Decimal("0")
         return held_quantity, held_cost
-
-    def _trade_return_exceeds_threshold(
-        self,
-        symbol: StockSymbol,
-        record: TradeRecord,
-        anchor_index: int,
-    ) -> bool:
-        values = self._calculate_trade_performance_values(
-            symbol,
-            record,
-            anchor_index,
-        )
-        return values is not None and values[1] > HIGH_RETURN_THRESHOLD
 
     def _refresh_performance_cells(self, symbol: StockSymbol) -> None:
         tree = self._tree_for_symbol(symbol)
