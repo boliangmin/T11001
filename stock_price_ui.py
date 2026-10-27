@@ -1339,12 +1339,11 @@ class StockTradeWindow(tk.Toplevel):
                 if match is None:
                     missing_items.append(item_id)
                     continue
-                sortable_items.append(
-                    (
-                        item_id,
-                        Decimal(match.group(1).replace(",", "")),
-                    )
-                )
+                value = Decimal(match.group(1).replace(",", ""))
+                if column == "return":
+                    # The cell shows a percentage; regular rows sort by the raw ratio.
+                    value /= 100
+                sortable_items.append((item_id, value))
                 continue
             if not item_id.startswith("trade-"):
                 missing_items.append(item_id)
