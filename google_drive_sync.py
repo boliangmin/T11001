@@ -38,6 +38,11 @@ DRIVE_UPLOAD_ROOT = "https://www.googleapis.com/upload/drive/v3"
 class CloudSyncError(RuntimeError):
     """Google 授权、Drive 请求或云端快照无效。"""
 
+    def __init__(self, message: str, *, oauth_error: str = "") -> None:
+        super().__init__(message)
+        # Google OAuth 错误代码（如 invalid_grant），用于判断是否需要重新授权。
+        self.oauth_error = oauth_error
+
 
 @dataclass(frozen=True)
 class OAuthClientConfig:
@@ -287,19 +292,26 @@ def _save_token(payload: dict[str, object]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _http_error_message(exc: HTTPError) -> str:
+def _http_error_details(exc: HTTPError) -> tuple[str, str]:
+    """返回可读的错误说明和 Google OAuth 错误代码（没有时为空字符串）。"""
     try:
         body = exc.read().decode("utf-8", errors="replace")
         payload = json.loads(body)
         if isinstance(payload, dict):
-            detail = payload.get("error_description") or payload.get("error")
+            error = payload.get("error")
+            oauth_error = error if isinstance(error, str) else ""
+            detail = payload.get("error_description") or error
             if isinstance(detail, dict):
                 detail = detail.get("message") or detail.get("status")
             if detail:
-                return f"HTTP {exc.code}: {detail}"
+                return f"HTTP {exc.code}: {detail}", oauth_error
     except (OSError, UnicodeError, json.JSONDecodeError):
         pass
-    return f"HTTP {exc.code}: {exc.reason}"
+    return f"HTTP {exc.code}: {exc.reason}", ""
+
+
+def _http_error_message(exc: HTTPError) -> str:
+    return _http_error_details(exc)[0]
 
 
 def _post_form(url: str, values: dict[str, str], timeout: float) -> dict[str, object]:
@@ -314,7 +326,8 @@ def _post_form(url: str, values: dict[str, str], timeout: float) -> dict[str, ob
         with urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
-        raise CloudSyncError(_http_error_message(exc)) from exc
+        message, oauth_error = _http_error_details(exc)
+        raise CloudSyncError(message, oauth_error=oauth_error) from exc
     except (URLError, TimeoutError, OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise CloudSyncError(f"Google 授权请求失败：{exc}") from exc
     if not isinstance(payload, dict):
@@ -420,7 +433,10 @@ def _refresh_access_token(
 ) -> dict[str, object]:
     refresh_token = str(token.get("refresh_token") or "")
     if not refresh_token:
-        raise CloudSyncError("Google 授权已过期且没有刷新令牌，请重新授权")
+        raise CloudSyncError(
+            "Google 授权已过期且没有刷新令牌，请重新授权",
+            oauth_error="invalid_grant",
+        )
     values = {
         "client_id": config.client_id,
         "refresh_token": refresh_token,
@@ -577,10 +593,8 @@ class GoogleDriveSyncClient:
                 refreshed = _refresh_access_token(self._config, token)
                 return str(refreshed["access_token"])
             except CloudSyncError as exc:
-                if (
-                    "invalid_grant" not in str(exc)
-                    and "没有刷新令牌" not in str(exc)
-                ):
+                # 刷新令牌过期、被撤销或缺失时重新授权，其他错误照常报告。
+                if exc.oauth_error != "invalid_grant":
                     raise
         if authorize_if_needed:
             token = _authorize_interactively(

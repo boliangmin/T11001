@@ -28,6 +28,8 @@
 
 OAuth 访问令牌和刷新令牌使用 Windows DPAPI 加密，保存在当前 Windows 用户的 `%LOCALAPPDATA%\StockPriceViewer\google_oauth_token.bin`，不会写入 `state.json` 或 Git 仓库。
 
+OAuth consent screen 处于测试（Testing）状态时，Google 签发的刷新令牌 7 天后失效；刷新令牌失效或被撤销后，下次云端操作会自动打开 Chrome 重新授权，授权完成后继续原操作。若不想每周重新授权，可在 Google Cloud Console 中将应用发布为正式版（In production）。
+
 ## 同步内容与覆盖规则
 
 上传内容是完整状态文件，包括股票、交易记录、T 交易分组、入金记录、窗口位置、列宽、当前页及其他界面状态。
