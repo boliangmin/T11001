@@ -965,8 +965,8 @@ class StockTradeWindow(tk.Toplevel):
         self.owner = owner
         self.symbol = symbol
         self.currency = "USD" if symbol.market == "US" else "HKD"
-        self._sort_column: str | None = None
-        self._sort_descending = False
+        self._sort_column: str | None = "trade_date"
+        self._sort_descending = True
         self._trade_cell_labels: dict[tuple[str, str], tk.Label] = {}
         self._overlay_after_id: str | None = None
         self._paired_column_resize_start: (
@@ -1324,13 +1324,20 @@ class StockTradeWindow(tk.Toplevel):
             return
 
         records = self.owner.trades.get(self.symbol.canonical, [])
-        sortable_items: list[tuple[str, str | Decimal]] = []
+        groups = {
+            f"{T_TRADE_ITEM_PREFIX}{group.group_id}": group
+            for group in self.owner.t_trade_groups.get(self.symbol.canonical, [])
+        }
+        sortable_items: list[tuple[str, Decimal | tuple[str, int]]] = []
         missing_items: list[str] = []
         for item_id in self.trade_tree.get_children(""):
             if item_id.startswith(T_TRADE_ITEM_PREFIX):
                 displayed_value = self.trade_tree.set(item_id, column)
                 if column == "trade_date":
-                    sortable_items.append((item_id, displayed_value))
+                    # Same-day rows follow entry order; a T row uses its last member.
+                    group = groups.get(item_id)
+                    entry_order = max(group.record_indices) if group else -1
+                    sortable_items.append((item_id, (displayed_value, entry_order)))
                     continue
                 match = re.match(
                     r"^\s*([+-]?\d[\d,]*(?:\.\d+)?)",
@@ -1356,7 +1363,7 @@ class StockTradeWindow(tk.Toplevel):
                 continue
 
             if column == "trade_date":
-                sortable_items.append((item_id, record.trade_date))
+                sortable_items.append((item_id, (record.trade_date, index)))
                 continue
 
             values = self.owner._calculate_trade_performance_values(
