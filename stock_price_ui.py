@@ -1220,6 +1220,7 @@ class StockTradeWindow(tk.Toplevel):
             profit, return_rate = self.owner._calculate_trade_performance(
                 self.symbol,
                 record,
+                index,
             )
             self.trade_tree.insert(
                 "",
@@ -1234,7 +1235,7 @@ class StockTradeWindow(tk.Toplevel):
                     return_rate,
                     "",
                 ),
-                tags=self._trade_row_tags(record),
+                tags=self._trade_row_tags(record, index),
             )
         self.refresh_summary()
 
@@ -1258,11 +1259,18 @@ class StockTradeWindow(tk.Toplevel):
             trade_type = residual.trade_type
             price = f"{Decimal(residual.price):,.3f} {self.currency}"
             quantity = residual.quantity
+            # A residual sale is realized against the holding cost before the group.
+            records = self.owner.trades.get(self.symbol.canonical, [])
+            anchor_index = min(
+                group.record_indices,
+                key=lambda index: (records[index].trade_date, index),
+            )
             profit, return_rate = self.owner._calculate_trade_performance(
                 self.symbol,
                 residual,
+                anchor_index,
             )
-            tags = self._trade_row_tags(residual)
+            tags = self._trade_row_tags(residual, anchor_index)
 
         remark = (
             f"T交易｜合并 {summary.record_count} 笔｜"
@@ -1301,11 +1309,12 @@ class StockTradeWindow(tk.Toplevel):
             values[4], values[5] = self.owner._calculate_trade_performance(
                 self.symbol,
                 record,
+                index,
             )
             self.trade_tree.item(
                 item_id,
                 values=values,
-                tags=self._trade_row_tags(record),
+                tags=self._trade_row_tags(record, index),
             )
         for group in self.owner.t_trade_groups.get(self.symbol.canonical, []):
             item_id = f"{T_TRADE_ITEM_PREFIX}{group.group_id}"
@@ -1318,9 +1327,17 @@ class StockTradeWindow(tk.Toplevel):
             self._sort_records(self._sort_column, self._sort_descending)
         self._schedule_trade_cell_labels()
 
-    def _trade_row_tags(self, record: TradeRecord) -> tuple[str, ...]:
+    def _trade_row_tags(
+        self,
+        record: TradeRecord,
+        anchor_index: int,
+    ) -> tuple[str, ...]:
         tags: list[str] = []
-        if self.owner._trade_return_exceeds_threshold(self.symbol, record):
+        if self.owner._trade_return_exceeds_threshold(
+            self.symbol,
+            record,
+            anchor_index,
+        ):
             tags.append("high_return")
         return tuple(tags)
 
@@ -1368,6 +1385,7 @@ class StockTradeWindow(tk.Toplevel):
             values = self.owner._calculate_trade_performance_values(
                 self.symbol,
                 record,
+                index,
             )
             if values is None:
                 missing_items.append(item_id)
@@ -5146,8 +5164,13 @@ class StockPriceApp(tk.Tk):
         self,
         symbol: StockSymbol,
         record: TradeRecord,
+        anchor_index: int,
     ) -> tuple[str, str]:
-        values = self._calculate_trade_performance_values(symbol, record)
+        values = self._calculate_trade_performance_values(
+            symbol,
+            record,
+            anchor_index,
+        )
         if values is None:
             return "--", "--"
 
@@ -5161,35 +5184,87 @@ class StockPriceApp(tk.Tk):
         self,
         symbol: StockSymbol,
         record: TradeRecord,
+        anchor_index: int,
     ) -> tuple[Decimal, Decimal, str] | None:
         current_quote = self.current_prices.get(symbol.canonical)
-        if current_quote is None:
-            return None
-
         try:
             trade_price = Decimal(record.price)
             quantity = Decimal(record.quantity)
         except InvalidOperation:
             return None
-        if (
-            trade_price <= 0
-            or quantity <= 0
-            or record.trade_type not in {"买入", "卖出"}
-        ):
+        if trade_price <= 0 or quantity <= 0:
             return None
 
-        current_price, currency = current_quote
-        direction = Decimal("1") if record.trade_type == "买入" else Decimal("-1")
-        profit = (current_price - trade_price) * quantity * direction
-        return_rate = (current_price - trade_price) / trade_price * direction
+        if record.trade_type == "买入":
+            if current_quote is None:
+                return None
+            current_price, currency = current_quote
+            profit = (current_price - trade_price) * quantity
+            return_rate = (current_price - trade_price) / trade_price
+            return profit, return_rate, currency
+        if record.trade_type != "卖出":
+            return None
+
+        # A sale is realized against the average holding cost right before it,
+        # so its result no longer follows the live price.
+        cost_basis = self._sell_cost_basis(symbol, anchor_index, quantity)
+        if cost_basis is None:
+            return None
+        currency = (
+            current_quote[1] if current_quote is not None else symbol.default_currency
+        )
+        profit = (trade_price - cost_basis) * quantity
+        return_rate = (trade_price - cost_basis) / cost_basis
         return profit, return_rate, currency
+
+    def _sell_cost_basis(
+        self,
+        symbol: StockSymbol,
+        anchor_index: int,
+        quantity: Decimal,
+    ) -> Decimal | None:
+        records = self.trades.get(symbol.canonical, [])
+        held_quantity = Decimal("0")
+        held_cost = Decimal("0")
+        for index in sorted(
+            range(len(records)),
+            key=lambda item: (records[item].trade_date, item),
+        ):
+            if index == anchor_index:
+                if held_quantity <= 0 or quantity > held_quantity:
+                    return None
+                return held_cost / held_quantity
+            record = records[index]
+            try:
+                price = Decimal(record.price)
+                record_quantity = Decimal(record.quantity)
+            except InvalidOperation:
+                continue
+            if price <= 0 or record_quantity <= 0:
+                continue
+            if record.trade_type == "买入":
+                held_quantity += record_quantity
+                held_cost += price * record_quantity
+            elif record.trade_type == "卖出":
+                if record_quantity < held_quantity:
+                    held_cost -= held_cost / held_quantity * record_quantity
+                    held_quantity -= record_quantity
+                else:
+                    held_quantity = Decimal("0")
+                    held_cost = Decimal("0")
+        return None
 
     def _trade_return_exceeds_threshold(
         self,
         symbol: StockSymbol,
         record: TradeRecord,
+        anchor_index: int,
     ) -> bool:
-        values = self._calculate_trade_performance_values(symbol, record)
+        values = self._calculate_trade_performance_values(
+            symbol,
+            record,
+            anchor_index,
+        )
         return values is not None and values[1] > HIGH_RETURN_THRESHOLD
 
     def _refresh_performance_cells(self, symbol: StockSymbol) -> None:
