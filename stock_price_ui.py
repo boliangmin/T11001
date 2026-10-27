@@ -1233,7 +1233,7 @@ class StockTradeWindow(tk.Toplevel):
                     record.quantity,
                     profit,
                     return_rate,
-                    "",
+                    self.owner._sell_cost_remark(self.symbol, record, index),
                 ),
                 tags=self._trade_row_tags(record, index),
             )
@@ -1255,6 +1255,7 @@ class StockTradeWindow(tk.Toplevel):
             profit = "--"
             return_rate = "--"
             tags: tuple[str, ...] = ()
+            cost_remark = ""
         else:
             trade_type = residual.trade_type
             price = f"{Decimal(residual.price):,.3f} {self.currency}"
@@ -1271,11 +1272,18 @@ class StockTradeWindow(tk.Toplevel):
                 anchor_index,
             )
             tags = self._trade_row_tags(residual, anchor_index)
+            cost_remark = self.owner._sell_cost_remark(
+                self.symbol,
+                residual,
+                anchor_index,
+            )
 
         remark = (
             f"T交易｜合并 {summary.record_count} 笔｜"
             f"获利 {summary.realized_profit:+,.2f} {self.currency}"
         )
+        if cost_remark:
+            remark += f"｜{cost_remark}"
         return (
             (
                 summary.trade_date,
@@ -1311,6 +1319,7 @@ class StockTradeWindow(tk.Toplevel):
                 record,
                 index,
             )
+            values[6] = self.owner._sell_cost_remark(self.symbol, record, index)
             self.trade_tree.item(
                 item_id,
                 values=values,
@@ -5223,6 +5232,40 @@ class StockPriceApp(tk.Tk):
         anchor_index: int,
         quantity: Decimal,
     ) -> Decimal | None:
+        held_quantity, held_cost = self._holding_before_trade(symbol, anchor_index)
+        if held_quantity <= 0 or quantity > held_quantity:
+            return None
+        return held_cost / held_quantity
+
+    def _sell_cost_remark(
+        self,
+        symbol: StockSymbol,
+        record: TradeRecord,
+        anchor_index: int,
+    ) -> str:
+        if record.trade_type != "卖出":
+            return ""
+        try:
+            quantity = Decimal(record.quantity)
+        except InvalidOperation:
+            return ""
+        held_quantity, held_cost = self._holding_before_trade(symbol, anchor_index)
+        holding_text = f"卖出前持仓 {held_quantity:,.0f}"
+        if held_quantity <= 0 or quantity > held_quantity:
+            return f"{holding_text}，少于卖出份额，无法计算成本价"
+        current_quote = self.current_prices.get(symbol.canonical)
+        currency = (
+            current_quote[1] if current_quote is not None else symbol.default_currency
+        )
+        return (
+            f"成本价 {held_cost / held_quantity:,.3f} {currency}｜{holding_text}"
+        )
+
+    def _holding_before_trade(
+        self,
+        symbol: StockSymbol,
+        anchor_index: int,
+    ) -> tuple[Decimal, Decimal]:
         records = self.trades.get(symbol.canonical, [])
         held_quantity = Decimal("0")
         held_cost = Decimal("0")
@@ -5231,9 +5274,7 @@ class StockPriceApp(tk.Tk):
             key=lambda item: (records[item].trade_date, item),
         ):
             if index == anchor_index:
-                if held_quantity <= 0 or quantity > held_quantity:
-                    return None
-                return held_cost / held_quantity
+                break
             record = records[index]
             try:
                 price = Decimal(record.price)
@@ -5252,7 +5293,7 @@ class StockPriceApp(tk.Tk):
                 else:
                     held_quantity = Decimal("0")
                     held_cost = Decimal("0")
-        return None
+        return held_quantity, held_cost
 
     def _trade_return_exceeds_threshold(
         self,
