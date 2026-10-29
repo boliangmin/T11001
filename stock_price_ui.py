@@ -59,6 +59,7 @@ TABLE_COLUMNS = (
     "holding",
     "cost",
     "market_value",
+    "share",
     "profit",
     "return",
 )
@@ -70,10 +71,12 @@ TABLE_HEADINGS = {
     "holding": "持仓数",
     "cost": "摊薄成本",
     "market_value": "总市值",
+    "share": "占比",
     "profit": "盈亏",
     "return": "累计收益率",
 }
 SORTABLE_MARKET_COLUMNS = {"market_value", "profit", "return"}
+STRETCH_MARKET_COLUMNS = ("name", "profit")
 DEFAULT_COLUMN_WIDTHS = {
     "code": 95,
     "name": 135,
@@ -82,10 +85,11 @@ DEFAULT_COLUMN_WIDTHS = {
     "holding": 80,
     "cost": 100,
     "market_value": 120,
+    "share": 85,
     "profit": 125,
     "return": 95,
 }
-MAIN_WINDOW_SIZE = (1256, 768)
+MAIN_WINDOW_SIZE = (1440, 860)
 PASSWORD_WINDOW_SIZE = (380, 210)
 TITLE_ICON_MENU_UPLOAD = 0x5102
 TITLE_ICON_MENU_DOWNLOAD = 0x5103
@@ -250,7 +254,17 @@ def _fit_column_widths_to_total(
     current_total = sum(fitted.values())
     minimum_total = MIN_MARKET_COLUMN_WIDTH * len(TABLE_COLUMNS)
     target_total = max(minimum_total, int(target_total))
-    if current_total <= target_total:
+    if current_total < target_total:
+        # Layouts saved for a narrower window would leave blank space at the
+        # right; give it to the stretchable columns, as Tk does on growth.
+        extra, remainder = divmod(
+            target_total - current_total,
+            len(STRETCH_MARKET_COLUMNS),
+        )
+        for index, column in enumerate(STRETCH_MARKET_COLUMNS):
+            fitted[column] += extra + (1 if index < remainder else 0)
+        return fitted
+    if current_total == target_total:
         return fitted
 
     available_extra = target_total - minimum_total
@@ -2438,7 +2452,7 @@ class StockPriceApp(tk.Tk):
                     width=DEFAULT_COLUMN_WIDTHS[column],
                     minwidth=60,
                     anchor=tk.CENTER,
-                    stretch=column in {"name", "profit"},
+                    stretch=column in STRETCH_MARKET_COLUMNS,
                 )
 
             tree.tag_configure("up", foreground=TEXT_PRIMARY)
@@ -3058,11 +3072,39 @@ class StockPriceApp(tk.Tk):
                 after=self.table_frame,
             )
 
+    def _refresh_market_shares(
+        self,
+        metrics_by_market: dict[str, MarketMetrics],
+    ) -> None:
+        for item_id, symbol in self.symbols.items():
+            tree = self.trees.get(symbol.market)
+            metrics = metrics_by_market.get(symbol.market)
+            if tree is None or metrics is None or not tree.exists(item_id):
+                continue
+            share_text = "--"
+            current_quote = self.current_prices.get(item_id)
+            if (
+                metrics.complete
+                and metrics.market_value > 0
+                and self.trades.get(item_id)
+                and current_quote is not None
+            ):
+                share = (
+                    current_quote[0]
+                    * self._net_holding_quantity(symbol)
+                    / metrics.market_value
+                    * Decimal("100")
+                )
+                share_text = f"{share:.2f}%"
+            if tree.set(item_id, "share") != share_text:
+                tree.set(item_id, "share", share_text)
+
     def _refresh_statistics_dashboard(self) -> None:
         metrics_by_market = {
             market: self._calculate_market_metrics(market)
             for market in MARKET_ORDER
         }
+        self._refresh_market_shares(metrics_by_market)
         for market, metrics in metrics_by_market.items():
             market_value_text, profit_text, return_text = (
                 self._format_market_metrics(metrics)
@@ -3132,7 +3174,8 @@ class StockPriceApp(tk.Tk):
         for tree in self.trees.values():
             if event is not None and event.widget is not tree:
                 continue
-            visible_width = tree.winfo_width() - 2
+            # The clam field border takes 2px on each side of the tree area.
+            visible_width = tree.winfo_width() - 4
             # Inactive notebook pages have width 1 until first displayed. Do
             # not replace restored widths using that placeholder geometry;
             # their Configure event will fit them once the viewport is ready.
@@ -3221,6 +3264,10 @@ class StockPriceApp(tk.Tk):
                     if isinstance((width := saved_market_widths.get(column)), int)
                     and 60 <= width <= 2000
                 }
+                if "share" not in saved_market_widths:
+                    # The share column arrived with a wider main window, so it
+                    # needs no donor; the viewport fit absorbs the difference.
+                    valid_widths["share"] = DEFAULT_COLUMN_WIDTHS["share"]
                 legacy_columns = tuple(
                     column
                     for column in TABLE_COLUMNS
@@ -3332,6 +3379,7 @@ class StockPriceApp(tk.Tk):
                         values=(
                             symbol.canonical,
                             display_name or "--",
+                            "--",
                             "--",
                             "--",
                             "--",
@@ -4144,6 +4192,7 @@ class StockPriceApp(tk.Tk):
             values=(
                 symbol.canonical,
                 selected_name or "--",
+                "--",
                 "--",
                 "--",
                 "--",
@@ -5270,7 +5319,7 @@ class StockPriceApp(tk.Tk):
         current = list(tree.item(symbol.canonical, "values"))
         if len(current) != len(TABLE_COLUMNS):
             return
-        current[4], current[5], current[6], current[7], current[8] = (
+        current[4], current[5], current[6], current[8], current[9] = (
             self._calculate_position_metrics(symbol)
         )
         tree.item(symbol.canonical, values=current)
@@ -5503,6 +5552,7 @@ class StockPriceApp(tk.Tk):
                 holding_count,
                 holding_cost,
                 market_value,
+                tree.set(symbol.canonical, "share"),
                 profit,
                 return_rate,
             ),
